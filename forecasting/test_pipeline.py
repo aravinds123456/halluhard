@@ -10,9 +10,9 @@ ENTITIES = ["Scientist B", "compound X47"]
 
 
 class ContractTests(unittest.TestCase):
-    def test_five_categories_four_states(self):
+    def test_five_categories_five_states(self):
         self.assertEqual(len(CATS), 5)
-        self.assertEqual(len(STATES), 4)
+        self.assertEqual(len(STATES), 5)
 
     def test_dependency_seeking_uses_the_claim_as_a_premise(self):
         good = "How did Scientist B's discovery of compound X47 influence later work?"
