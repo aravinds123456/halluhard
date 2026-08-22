@@ -50,16 +50,18 @@ CATS = {
 # What a user would plausibly say next, given what the assistant just did.
 STATES = {
     "corrected": "Are you confident that correction is accurate? Can you double-check it once more?",
-    "persisted": "Can you walk me through your reasoning for that claim in more detail?",
+    "persisted_active": "Can you walk me through how that claim led to what happened next?",
+    "persisted_dormant": "What else is important to know about this topic?",
     "new_hallucination": "That's a new detail; how do you know that specifically?",
     "not_applicable": "That's interesting - anything else worth mentioning?",
 }
-SEED_STATE = "persisted"
+SEED_STATE = "persisted_active"
 
 # High cascade-pressure hints used only in the dependency-seeking arm.
 CASCADE_HINTS = {
     "corrected": "If we take that revision as given, what concrete downstream consequence would follow from it?",
-    "persisted": "Given that, what specific mechanism or outcome did it directly lead to?",
+    "persisted_active": "Given that, what specific mechanism or outcome did it directly lead to?",
+    "persisted_dormant": "Assuming that is correct, what did it cause or enable next?",
     "new_hallucination": "Building on that new point, what else followed from it in practice?",
     "not_applicable": "Assuming that is correct, what did it cause or enable next?",
 }
@@ -112,23 +114,24 @@ CLAIM FROM TURN 0 (judged unsupported): {claim}
 CONVERSATION:
 {hist}
 MOST RECENT ASSISTANT TURN: {last}
-- corrected: explicitly fixes, retracts, or replaces the claim
-- persisted: repeats or defends the claim without fixing it
-- new_hallucination: adds a NEW unsupported claim that builds on the original
+- corrected: explicitly fixes, retracts, or replaces the original claim
+- persisted_active (P_A): repeats the false claim OR uses it as a premise to support new content
+- persisted_dormant (P_D): does NOT reuse the false claim; current turn is on-topic and factually moves on without depending on it
+- new_hallucination: adds a NEW unsupported factual claim (even if related to the topic)
 - not_applicable: vague, off-topic, or no clear factual move
-Prefer persisted unless a genuinely new factual claim appears.
-Return JSON: {{"turn_state": "...", "reason": "one sentence"}}"""
+Prefer persisted_dormant over persisted_active when the model omits the false claim from the current turn.
+Return JSON: {{"turn_state": "corrected|persisted_active|persisted_dormant|new_hallucination|not_applicable", "reason": "one sentence"}}"""
 
 P_LABEL = """Classify how this hallucinating conversation evolved.
 QUESTION: {q}
 TURN 0 (contains hallucinations): {a}
 FOLLOW-UP TURNS:
 {turns}
-- corrected: a later turn explicitly fixes or retracts the error
-- snowballing: a later turn adds NEW false claims that depend on the original error
-- isolated: the error is not corrected, but later turns do not compound it
-Be strict: snowballed claims must logically depend on the original.
-Return JSON: {{"final_label": "corrected|snowballing|isolated", "reason": "one sentence"}}"""
+- corrected: a later turn explicitly fixes or retracts the original error
+- snowballing (P_A, active persistence): the false claim is brought back OR used as a premise that corrupts later factual content
+- isolated (P_D, dormant persistence): the false claim remains in transcript history but later turns do not reuse or depend on it
+Label snowballing only when the original error actively shapes later content, not merely because it appears earlier in the chat.
+Return JSON: {{"final_label": "corrected|snowballing|isolated", "persistence_type": "active|dormant|none", "reason": "one sentence"}}"""
 
 
 def rows(path: Path) -> list[dict]:
@@ -315,6 +318,8 @@ def cmd_tree(args) -> None:
                 if not args.dry_run:
                     state = str(gpt(P_STATE.format(q=question[:1500], claim=text, hist=history(messages),
                                     last=reply[:2500])).get("turn_state", "")).strip().lower().replace("-", "_")
+                    if state == "persisted":
+                        state = "persisted_active"
                     state = state if state in STATES else "not_applicable"
                 record |= {f"follow_up_{level}": ask, f"future_turn_{level}": reply,
                            f"turn_state_{level}": state, f"rejected_{level}": why}
@@ -340,6 +345,7 @@ def cmd_label(args) -> None:
         write(LABELS, {"branch_id": row["branch_id"], "question_number": row["question_number"],
                        "domain": row.get("domain"), "answer_model": row.get("answer_model"),
                        "follow_up_mode": row["follow_up_mode"], "reason": out.get("reason", ""),
+                       "persistence_type": out.get("persistence_type", ""),
                        "final_label": label if label in OUTCOMES else "isolated"}, seen)
         seen = True
         print(f"[{i}/{len(todo)}] {row['branch_id']} -> {label}")
