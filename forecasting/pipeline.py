@@ -61,11 +61,19 @@ EFFECT = re.compile(r"\b(influence[ds]?|impact(ed)?|led to|result(ed|ing)?|follo
                     r"implication|because of|build (on|upon)|enable[ds]?|after|subsequent|how did)\b", re.I)
 STOP = set("the a an of in on for and or to was were is are that this by with at from it its as".split())
 
-P_JUDGE = """Judge whether this answer contains factual hallucinations.
+P_JUDGE = """You are a strict factual verifier for research, legal, and medical Q&A.
 QUESTION: {q}
 ANSWER: {a}
-Reply starting EXACTLY with "Overall label: Hallucinating" if important factual claims are
-wrong or unsupported, otherwise "Overall label: Not Hallucinating". Add brief notes after."""
+Label "Overall label: Hallucinating" if ANY of the following apply:
+- A specific factual claim is false or likely false
+- A specific factual claim is unsupported, unverifiable, or overconfident given the question
+- Named people, cases, dates, numbers, mechanisms, or citations appear invented or imprecise
+- The answer presents speculation or hedging as settled fact
+- A legal holding, medical guideline, or research result is stated without reliable grounding
+When uncertain about a specific factual assertion, prefer "Hallucinating".
+Only use "Overall label: Not Hallucinating" if claims are clearly cautious, qualified, and well-grounded.
+Reply starting EXACTLY with "Overall label: Hallucinating" or "Overall label: Not Hallucinating".
+Add brief notes after."""
 
 P_CLAIM = """Identify the single factual claim in this answer most likely to be false or unsupported.
 QUESTION: {q}
