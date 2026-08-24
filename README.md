@@ -1,5 +1,7 @@
 # HalluHard: A Hard Multi-Turn Hallucination Benchmark
 
+**Cascade experiment docs (this checkout):** [forecasting/README.md](forecasting/README.md)
+
 ![HalluHard open vs proprietary models](pics/halluhard_vertical_bar_open_vs_prop.png)
 
 A framework for evaluating hallucinations in multi-turn conversations across challenging domains.
@@ -7,6 +9,30 @@ A framework for evaluating hallucinations in multi-turn conversations across cha
 Check out our website for the updates on newly released models: https://halluhard.com/
 
 See [CHANGELOG.md](CHANGELOG.md) for the history of model additions and benchmark updates.
+
+## What's in this repository
+
+This checkout has two layers that share the same question files:
+
+| Layer | What it measures | Start here |
+|---|---|---|
+| **HalluHard benchmark** | How often a model invents facts in cited multi-turn chats (research, legal, medical, coding) | The rest of this README |
+| **Cascade experiment** | After the model has already made a false claim, what five different user styles do to that same lie over three turns | **[forecasting/README.md](forecasting/README.md)** |
+
+The published HalluHard paper is the first layer. The cascade code reuses those questions but runs a different protocol: freeze one seed lie, fork five pure user styles (dependency-seeking, neutral, skeptical, accepting, topic-shift), and label each turn `DROP` / `CORRECT` / `REPEAT` / `DEPEND`.
+
+```
+research_questions/   legal_cases/   medical_guidelines/   coding/
+    HalluHard tasks: generate conversations → judge claims → HTML report
+
+forecasting/
+    Cascade study: generate seeds → 5-style tree → outcome tables
+
+judging_pipeline/     tools/     report.py
+    Shared claim judges, annotators, and the HalluHard HTML reporter
+```
+
+If you cloned this repo to run or read the cascade study, skip to [forecasting/README.md](forecasting/README.md). The original one-shot / multi-turn HalluHard pipeline is documented below.
 
 ## Preparation
 
@@ -108,29 +134,25 @@ pixi run report \
 
 ## Cascade forecasting
 
-HalluHard's 5-strategy cascade tree is merged with [HallucinationResearchTest](https://github.com/mbhat012/HallucinationResearchTest.git): per-turn DROP/CORRECT/REPEAT/DEPEND labels, teacher-forced confidence, per-model seed generation, and resume-safe writes.
+The cascade study lives under [`forecasting/`](forecasting/). Full walkthrough, labels, and file map: **[forecasting/README.md](forecasting/README.md)**.
+
+Default design: **100** domain-balanced hallucinating seeds × **5** pure user styles × **3** turns. Answering model `Qwen/Qwen3.5-2B` (thinking off). Judge and follow-up writer `gpt-5-mini`.
 
 ```bash
-# Reproduce the cleaned partial-run report (no GPU)
-python forecasting/pipeline.py report --from-partial
+# No GPU: rebuild tables from the captured 61-seed snapshot
+pixi run forecast-report
+# or: python forecasting/pipeline.py report --from-partial
 
-# Full experiment (100 seeds x 5 strategies x 5 turns)
-python forecasting/pipeline.py answer --domain all --resume
-python forecasting/pipeline.py judge  --domain all --resume
-python forecasting/pipeline.py tree   --max-seeds 100 --levels 5 --resume
-python forecasting/pipeline.py label  --resume
-python forecasting/pipeline.py report
-
-# New model under test: generate that model's own seeds first
-TEST_MODEL="meta-llama/Llama-3.1-8B-Instruct" python forecasting/generate_seeds.py
-python forecasting/pipeline.py tree --seeds forecasting/seeds_meta-llama-llama-3.1-8b-instruct.jsonl --resume
+# Full experiment (needs a local GPU or Apple MPS + OPENAI_API_KEY)
+MAX_QUESTIONS=400 python forecasting/generate_seeds.py
+python forecasting/pipeline.py tree \
+  --seeds forecasting/seeds_qwen-qwen3.5-2b.jsonl \
+  --out forecasting/cascade_tree_100x3.jsonl \
+  --max-seeds 100 --levels 3 --resume
+python forecasting/pipeline.py report --tree forecasting/cascade_tree_100x3.jsonl
 ```
 
-`python maincode.py` still works and maps HallucinationResearchTest env vars (`TEST_MODEL`, `MAX_EXAMPLES`, `INPUT_PATH`, `OUTPUT_PATH`, `NUM_TURNS`) onto `pipeline.py tree`.
-
-Default design: 100 domain-balanced hallucinating seeds, five pure strategies (dependency-seeking, neutral, skeptical, accepting, topic-shift), five turns, greedy decoding with thinking disabled. Do not mix follow-up styles inside a branch if you want to report a per-strategy table.
-
-See `python forecasting/pipeline.py report --from-partial` for Wilson CIs, the domain split, and the re-run checklist against the captured 61-seed PDF.
+`python maincode.py` maps HallucinationResearchTest env vars (`TEST_MODEL`, `MAX_EXAMPLES`, `INPUT_PATH`, `OUTPUT_PATH`, `NUM_TURNS`) onto `pipeline.py tree`. Do not mix a 4B seed file into a 2B tree. Do not mix follow-up styles inside one branch if you want a per-style table.
 
 ## Available Tasks
 
@@ -158,7 +180,7 @@ The framework supports multiple LLM providers and models:
 ## Project Structure
 
 ```
-<task>/
+<task>/                       # research_questions, legal_cases, medical_guidelines, coding
   ├── data/                    # Input data
   │   └── *.jsonl             # Task-specific question datasets
   ├── results/                 # Generated conversations and evaluations
@@ -167,6 +189,10 @@ The framework supports multiple LLM providers and models:
   │   └── reports/             # HTML reports
   ├── prompts/                 # Task-specific prompts
   └── generate_responses.py    # Response generation script
+
+forecasting/                   # Cascade study (see forecasting/README.md)
+judging_pipeline/              # Claim judges used by the HalluHard path
+tools/                         # Annotators and judge-agreement scripts
 ```
 
 ## CLI Reference

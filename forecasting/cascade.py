@@ -229,6 +229,16 @@ def env_float(name: str, default: float) -> float:
     return float(value) if value else default
 
 
+DEFAULT_MAX_SEEDS = env_int("MAX_EXAMPLES", 100)
+DEFAULT_TURNS = env_int("NUM_TURNS", 3)
+# Qwen3.5-2B is the answering model (same family as the PDF run). Do not
+# loosen the judge to manufacture extra seeds; generate more 2B answers instead.
+DEFAULT_TEST_MODEL = "Qwen/Qwen3.5-2B"
+DEFAULT_OPENAI_JUDGE = "gpt-5-mini"
+# Qwen3.5 can think by default. Keep reasoning off unless ENABLE_THINKING=1.
+ENABLE_THINKING = env_str("ENABLE_THINKING", "0").lower() in {"1", "true", "yes", "on"}
+
+
 def model_slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-").lower()
 

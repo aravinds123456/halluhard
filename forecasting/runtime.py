@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 import time
 
-from cascade import env_int, env_str, strip_thinking
+from cascade import DEFAULT_OPENAI_JUDGE, ENABLE_THINKING, env_int, env_str, strip_thinking
 
 GEMINI_RETRIES = env_int("GEMINI_RETRIES", 5)
 MAX_NEW_TOKENS = env_int("MAX_NEW_TOKENS", 400)
 JUDGE_MODEL_NAME = env_str("JUDGE_MODEL", "gemini-2.5-flash")
-OPENAI_MODEL = env_str("OPENAI_LABEL_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = env_str("OPENAI_LABEL_MODEL", DEFAULT_OPENAI_JUDGE)
+OPENAI_REASONING_EFFORT = env_str("OPENAI_REASONING_EFFORT", "minimal")
 
 tokenizer = None
 model = None
@@ -55,7 +56,7 @@ def init_model(name: str):
     device = resolve_device()
     dtype = resolve_dtype(device)
     trust = env_str("TRUST_REMOTE_CODE", "0") == "1"
-    print(f"Loading {name} on {device} ({dtype})...")
+    print(f"Loading {name} on {device} ({dtype}), thinking={'on' if ENABLE_THINKING else 'off'}...")
     tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=trust)
     model = AutoModelForCausalLM.from_pretrained(
         name, dtype=dtype, trust_remote_code=trust,
@@ -68,13 +69,58 @@ def init_model(name: str):
     return tokenizer, model, device
 
 
+_THINKING_MODE_LOGGED = False
+
+
+def with_no_think_tag(messages):
+    """Copy messages and append Qwen's /no_think soft switch to the last user turn."""
+    copied = [{**message} for message in messages]
+    for message in reversed(copied):
+        if message.get("role") == "user":
+            content = str(message.get("content") or "").rstrip()
+            if "/no_think" not in content:
+                message["content"] = f"{content}\n/no_think"
+            break
+    return copied
+
+
+def _log_thinking_mode(how: str) -> None:
+    global _THINKING_MODE_LOGGED
+    if _THINKING_MODE_LOGGED:
+        return
+    _THINKING_MODE_LOGGED = True
+    state = "on" if ENABLE_THINKING else "off"
+    print(f"Qwen reasoning/thinking: {state} ({how})")
+
+
 def build_model_inputs(messages):
+    if tokenizer is None:
+        raise RuntimeError("Call init_model() before build_model_inputs().")
     kwargs = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
-    # Qwen3.5 otherwise spends the token budget on a hidden chain-of-thought.
+    if ENABLE_THINKING:
+        _log_thinking_mode("ENABLE_THINKING=1")
+        try:
+            return tokenizer.apply_chat_template(messages, enable_thinking=True, **kwargs)
+        except TypeError:
+            return tokenizer.apply_chat_template(messages, **kwargs)
+
+    # Qwen3.5 thinks unless the chat template gets an explicit hard switch.
     try:
-        return tokenizer.apply_chat_template(messages, enable_thinking=False, **kwargs)
+        encoded = tokenizer.apply_chat_template(messages, enable_thinking=False, **kwargs)
+        _log_thinking_mode("enable_thinking=False")
+        return encoded
     except TypeError:
-        return tokenizer.apply_chat_template(messages, **kwargs)
+        pass
+    try:
+        encoded = tokenizer.apply_chat_template(
+            messages, chat_template_kwargs={"enable_thinking": False}, **kwargs
+        )
+        _log_thinking_mode("chat_template_kwargs enable_thinking=False")
+        return encoded
+    except TypeError:
+        pass
+    _log_thinking_mode("/no_think fallback; tokenizer has no enable_thinking argument")
+    return tokenizer.apply_chat_template(with_no_think_tag(messages), **kwargs)
 
 
 def generate_response(messages, max_new_tokens: int | None = None) -> str:
@@ -108,22 +154,50 @@ def load_qwen(name: str):
     return chat
 
 
+def _uses_responses_api(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
+def _openai_text(client, prompt: str, as_json: bool) -> str:
+    """GPT-5 rejects temperature=0 on chat completions; use the Responses API."""
+    if _uses_responses_api(OPENAI_MODEL):
+        kwargs = {
+            "model": OPENAI_MODEL,
+            "input": prompt,
+            "reasoning": {"effort": OPENAI_REASONING_EFFORT},
+        }
+        if as_json:
+            kwargs["text"] = {"format": {"type": "json_object"}}
+        return (client.responses.create(**kwargs).output_text or "").strip()
+    extra = {"response_format": {"type": "json_object"}} if as_json else {}
+    return (
+        client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            **extra,
+        ).choices[0].message.content
+        or ""
+    ).strip()
+
+
 def gpt(prompt: str, as_json: bool = True):
     from openai import OpenAI
 
     if not os.environ.get("OPENAI_API_KEY", "").strip():
         raise SystemExit("Set OPENAI_API_KEY")
-    extra = {"response_format": {"type": "json_object"}} if as_json else {}
-    reply = OpenAI().chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        **extra,
-    ).choices[0].message.content or ""
+    reply = _openai_text(OpenAI(), prompt, as_json=as_json)
     if as_json:
         import json
         return json.loads(reply or "{}")
     return reply
+
+
+def active_judge_model() -> str:
+    if judge_backend() == "gemini":
+        return JUDGE_MODEL_NAME
+    return OPENAI_MODEL
 
 
 def setup_gemini():

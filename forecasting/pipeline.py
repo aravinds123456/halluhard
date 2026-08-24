@@ -2,7 +2,7 @@
 
   python forecasting/pipeline.py answer --domain all --resume
   python forecasting/pipeline.py judge  --domain all --resume
-  python forecasting/pipeline.py tree   --max-seeds 100 --levels 5 --resume
+  python forecasting/pipeline.py tree   --max-seeds 100 --levels 3 --resume
   python forecasting/pipeline.py label  --resume
   python forecasting/pipeline.py report --from-partial
   python forecasting/pipeline.py tree --dry-run --max-seeds 2
@@ -24,6 +24,10 @@ if str(DIR) not in sys.path:
 from cascade import (
     BATCH,
     CATS,
+    DEFAULT_MAX_SEEDS,
+    DEFAULT_TEST_MODEL,
+    DEFAULT_TURNS,
+    ENABLE_THINKING,
     DOMAINS,
     HALL,
     LABELS,
@@ -61,7 +65,7 @@ from cascade import (
     write,
 )
 
-QWEN = env_str("TEST_MODEL", env_str("QWEN_MODEL", "Qwen/Qwen3.5-2B"))
+QWEN = env_str("TEST_MODEL", env_str("QWEN_MODEL", DEFAULT_TEST_MODEL))
 
 
 def gpt(prompt: str, as_json: bool = True):
@@ -109,7 +113,9 @@ def cmd_answer(args) -> None:
 
 def cmd_judge(args) -> None:
     """Step B: mark each turn-0 answer hallucinating or not, then merge domains."""
+    from runtime import active_judge_model
     merged = {r["question_number"]: r for r in rows(BATCH)} if args.resume else {}
+    print(f"Judge model: {active_judge_model()}")
     for domain in (DOMAINS if args.domain == "all" else [args.domain]):
         for row in rows(DIR / f"batch_results_{domain}.jsonl"):
             if row["question_number"] in merged and merged[row["question_number"]].get("gemini_judgement"):
@@ -122,6 +128,7 @@ def cmd_judge(args) -> None:
                 )
             row["qwen_answer"] = answer
             row["gemini_judgement"] = verdict
+            row["judge_model_name"] = active_judge_model()
             merged[row["question_number"]] = row
             print(row["question_number"], verdict.split("\n")[0])
     BATCH.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in merged.values()), encoding="utf-8")
@@ -187,10 +194,14 @@ def cmd_tree(args) -> None:
     out = Path(args.out)
     done = {r["branch_id"] for r in rows(out)} if args.resume else set()
     seen = bool(done)
+    from runtime import active_judge_model
+    judge_name = active_judge_model()
     print(
         f"{len(seeds)} seeds x {len(cats)} categories x {args.levels} levels = "
         f"{len(seeds) * len(cats)} branches, {len(seeds) * len(cats) * args.levels} answers"
     )
+    print(f"Answer model: {args.model} (thinking {'on' if ENABLE_THINKING else 'off'})")
+    print(f"Judge model: {judge_name if not args.dry_run else 'dry-run'}")
     print(
         "Sampling: "
         + ", ".join(
@@ -257,7 +268,8 @@ def cmd_tree(args) -> None:
                 "sample_index": seed.get("sample_index"),
                 "domain": domain_of(seed),
                 "answer_model": args.model,
-                "judge_model_name": os.environ.get("OPENAI_LABEL_MODEL", "gpt-4o-mini"),
+                "judge_model_name": judge_name,
+                "enable_thinking": ENABLE_THINKING,
                 "follow_up_mode": cat,
                 "question": question,
                 "original_answer": first,
@@ -367,8 +379,8 @@ def main() -> None:
     tree = sub.add_parser("tree", help="build the follow-up tree")
     tree.add_argument("--seeds", default=str(BATCH), help="any JSONL with question + answer + judgement")
     tree.add_argument("--out", default=str(TREE))
-    tree.add_argument("--max-seeds", type=int, default=int(os.environ["MAX_EXAMPLES"]) if os.environ.get("MAX_EXAMPLES") else 100)
-    tree.add_argument("--levels", type=int, default=5)
+    tree.add_argument("--max-seeds", type=int, default=DEFAULT_MAX_SEEDS)
+    tree.add_argument("--levels", type=int, default=DEFAULT_TURNS)
     tree.add_argument("--categories", default="all")
     tree.add_argument("--dry-run", action="store_true", help="stub answers, no GPU or API")
     label = sub.add_parser("label", help="label branch outcomes")
