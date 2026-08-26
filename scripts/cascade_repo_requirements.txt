@@ -1,5 +1,7 @@
 torch
 transformers
 openai
+httpx
+certifi
 google-genai
 fpdf2

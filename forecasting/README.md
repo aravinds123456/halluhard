@@ -67,9 +67,16 @@ Needs Azure credentials for GPT-OSS and `OPENAI_API_KEY` for the judge.
 
 Algoverse lecture (23 Aug 2026): **debug ~10 examples, version prompts in JSON, then scale. Report every outcome. Do not overclaim.**
 
+Use Homebrew Python (`venv/`), not Apple Command Line Tools Python 3.9 (`.venv`). Copy the real endpoint and keys from Azure Portal and platform.openai.com. Leaving `YOUR-RESOURCE` or `(new key after rotate)` in the environment fails TLS before any model call.
+
 ```bash
+source venv/bin/activate
+pip install -U certifi httpx openai
+
+# Real hostname from Azure Portal → Keys and Endpoint. Do not leave YOUR-RESOURCE.
 export AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
 export AZURE_OPENAI_API_KEY=...
+export AZURE_OPENAI_DEPLOYMENT=gpt-oss-120b
 export OPENAI_API_KEY=...
 
 # 1) Debug seed-judge prompts on ~10 questions (required before a large seed run)
@@ -103,7 +110,10 @@ python forecasting/generate_seeds.py --pilot --rejudge
 Do not delete the seed file for a judge change. Deleting it would redraw answers and confound the judge with the model. v4 is stricter about invented particulars and about not scoring the question excerpt. It does not aim for a target hallucination rate; 3/10 can be a real rate if the model mostly restated the excerpt.
 
 If your Azure endpoint is Models-as-a-Service, set
-`AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/`.
+`AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/`
+(replace `YOUR-RESOURCE`).
+
+`CERTIFICATE_VERIFY_FAILED` on macOS is Apple CLT Python 3.9. `SSLV3_ALERT_HANDSHAKE_FAILURE` is usually a placeholder Azure host, a VPN, or OpenAI SDK HTTPX2 on Python 3.14. The runtime injects certifi + HTTP/1.1. If 3.14 still handshake-fails, use `python@3.12`.
 
 ```bash
 python maincode.py

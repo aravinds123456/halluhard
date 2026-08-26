@@ -279,7 +279,9 @@ def cmd_tree(args) -> None:
     existing = {r["branch_id"]: r for r in rows(out)} if args.resume else {}
     done = set(existing)
     seen = bool(done)
-    from runtime import active_judge_model
+    from runtime import active_judge_model, require_live_api
+    if not args.dry_run:
+        require_live_api(args.model)
     judge_name = active_judge_model()
     per_seed = prompt_count(len(cats), args.levels)
     print(

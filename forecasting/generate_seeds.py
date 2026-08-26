@@ -305,6 +305,7 @@ def main():
         azure_reasoning_effort,
         azure_send_temperature,
         judge_backend,
+        require_live_api,
         setup_gemini,
         uses_azure_answer,
     )
@@ -342,6 +343,7 @@ def main():
     if dry_run:
         print("DRY_RUN=1 set; validation passed, exiting before model/API calls.")
         return
+    require_live_api(MODEL_NAME)
     if rejudge:
         rejudge_existing(question_items, pilot)
         return
