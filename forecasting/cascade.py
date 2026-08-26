@@ -69,8 +69,6 @@ DOMAIN_ORDER = ("research", "legal", "medical")
 OTHER_DOMAINS = ("legal", "medical")
 SEED_CLASSES = ("hallucinating", "not_hallucinating")
 DOMAIN_GROUPS = ("research", "other")
-# Alternate research vs legal/medical so n=100 is 50/50 on domain group.
-SAMPLE_GROUP_ORDER = ("research", "other")
 
 # category: (instruction, must ask to verify, name the claim entity, must ask consequences)
 # D / N / V only. Accepting and topic-shift are not part of this tree.
