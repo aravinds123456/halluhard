@@ -50,6 +50,8 @@ Each follow-up answer is judged **only against the seed false claim**:
 
 The node outcome is derived from the labels on that path (`DEPEND` beats `REPEAT` beats `CORRECT` beats `DROP`). Live logs and reports use those four names only. `persisted_active` / `persisted_dormant` were old PDF aliases and are mapped back to DEPEND / DROP if they appear in an old capture.
 
+Follow-ups are written by gpt-5-mini. A keyword `check()` still logs style mismatches on `rejected_*`, but the drafted question is kept unless it is empty, has no `?`, or leaks the answer. The deterministic `backup()` template is only for those hard failures. Do not resume an old tree that already stored fallback D/V questions if you want this behavior.
+
 Judge labels are parsed **strictly** (`Overall label: DEPEND`, JSON `"label"`, or the bare token). Prose like “does not DEPEND” is not a label. Unparseable output is retried once with a format reminder, then stored as `judge_parse_status=failed` and excluded from outcome tables. It is not counted as DROP.
 
 ## Default run

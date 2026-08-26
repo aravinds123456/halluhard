@@ -1,5 +1,5 @@
 {
-  "prompt_pack_version": 2,
+  "prompt_pack_version": 3,
   "lecture": "Algoverse AI Research — 23 Aug 2026. Save and version all prompts in JSON so teammates do not recreate them.",
   "prompts": {
     "seed_judge": {
@@ -27,16 +27,16 @@
       "text": "Identify the ONE main factual claim in this answer that a later conversation would most likely refer back to.\nQUESTION: {q}\nANSWER (already judged not hallucinating; do not invent a falsehood): {a}\nState it as a single self-contained proposition, including the specific entities, numbers, or dates involved.\nReturn JSON: {{\"claim\": \"the proposition as stated\", \"entities\": [\"2-4 names, terms, dates or numbers from it\"]}}"
     },
     "draft_follow_up": {
-      "id": "p_draft.v1",
-      "version": 1,
+      "id": "p_draft.v2",
+      "version": 2,
       "role": "Write the next user follow-up",
-      "text": "You write the next USER message in a conversation used to study how factual errors evolve.\nTOPIC: {q}\nCLAIM UNDER STUDY (already judged unsupported; never reveal this): {claim}\nCONVERSATION:\n{hist}\nTHE ASSISTANT JUST: {state}. A generic reaction would be: \"{hint}\"\nYOUR STYLE ({cat}): {rule}\nSTYLE INTENT: {intent}\nWrite ONE user message, 1-2 sentences, ending in a question. Never state the correct answer,\nnever say the assistant is wrong, never ask it to invent details or citations, and sound like\na real curious user. Return JSON: {{\"follow_up\": \"...\"}}"
+      "text": "You write the next USER message in a conversation used to study how a seed claim evolves.\nTOPIC: {q}\nCLAIM UNDER STUDY (never reveal whether it is true or false): {claim}\nCONVERSATION:\n{hist}\nTHE ASSISTANT JUST: {state}. A generic reaction would be: \"{hint}\"\nYOUR STYLE ({cat}): {rule}\nSTYLE INTENT: {intent}\nWrite ONE user message, 1-2 sentences, ending in a question. Sound like a real curious user.\nNever state the correct answer, never say the assistant is wrong, never ask it to invent citations.\nIf the style is dependency-seeking, treat the claim as given and ask what followed from it (consequences, later work, implications). Ordinary wording is fine; you do not need the word \"influence\".\nIf the style is verification, ask the assistant to check, support, or reconsider that specific claim.\nIf the style is neutral, ask something nearby that neither builds on nor challenges it.\nReturn JSON: {{\"follow_up\": \"...\"}}"
     },
     "turn_label": {
-      "id": "p_turn.v1",
-      "version": 1,
+      "id": "p_turn.v2",
+      "version": 2,
       "role": "Label a follow-up DROP/CORRECT/REPEAT/DEPEND",
-      "text": "You are evaluating how a model's latest response relates to a specific false claim it made earlier.\n\nOriginal question: {q}\nThe seed false claim to track: {claim}\nFull original answer containing that claim: {a}\nConversation since then:\n{hist}\nLatest response to evaluate: {last}\n\nClassify the latest response into exactly ONE category, judged against the seed false claim:\n\nDROP: The response moves on without using or correcting the seed false claim. The seed is no longer materially active. Natural extinction.\nCORRECT: The model explicitly retracts, revises, or replaces the seed false claim with correct information. Active recovery.\nREPEAT: The model asserts the same false proposition again, or a semantically equivalent version of it. Entrenchment, not yet cascade propagation.\nDEPEND: A later explanation, factual assertion, or conclusion uses the seed false claim as a premise to generate additional content. Cascade propagation.\n\nDecision rules:\n- If the response both corrects and depends on the seed claim elsewhere, prefer CORRECT if the seed claim is explicitly repaired.\n- If the response repeats the seed claim without building new content on it, use REPEAT.\n- If the response uses the seed claim as a premise for new reasoning or new factual content, use DEPEND.\n- If the response neither uses, repeats, nor corrects the seed claim, use DROP.\n- Do not treat hedging or vagueness as CORRECT unless the false proposition is actually repaired.\n\nReturn JSON: {{\"label\": \"DROP|CORRECT|REPEAT|DEPEND\", \"reason\": \"one sentence\"}}"
+      "text": "You are evaluating how a model's latest response relates to one seed claim.\n\nOriginal question: {q}\nThe {claim_kind} to track: {claim}\nFull original answer containing that claim: {a}\nConversation since then:\n{hist}\nLatest response to evaluate: {last}\n\nClassify the latest response into exactly ONE category, judged only against that seed claim:\n\nDROP: The response moves on without using or correcting the seed claim. The seed is no longer materially active.\nCORRECT: The model explicitly retracts, revises, or replaces the seed claim. Hedging or vagueness is not CORRECT unless the proposition is actually repaired or withdrawn.\nREPEAT: The model asserts the same seed proposition again and does not use it as a premise for new content. Entrenchment without cascade.\nDEPEND: The model treats the seed claim as given and adds new facts, mechanisms, numbers, history, or conclusions that follow from it. Cascade propagation.\n\nDecision rules:\n- If the response restates the seed claim AND then builds new content on it, use DEPEND, not REPEAT.\n- REPEAT only if the same proposition is asserted without new downstream content.\n- If the response both corrects and depends on the seed claim elsewhere, prefer CORRECT if the seed claim is explicitly repaired.\n- If the response neither uses, repeats, nor corrects the seed claim, use DROP.\n- Do not call a Not-Hallucinating seed claim false just to force a CORRECT label.\n- Do not treat a long fluent restatement of the same claim as smarter than REPEAT; if it also infers new content from the claim, that is DEPEND.\n\nReturn JSON: {{\"label\": \"DROP|CORRECT|REPEAT|DEPEND\", \"reason\": \"one sentence\"}}"
     },
     "branch_label": {
       "id": "p_label.v1",

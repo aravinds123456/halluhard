@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pipeline import CATS, STATES, backup, check, names
+from cascade import followup_is_hard_fail
 
 ENTITIES = ["Scientist B", "compound X47"]
 
@@ -32,9 +33,25 @@ class ContractTests(unittest.TestCase):
         asking = "Are you sure Scientist B influenced that later work?"
         self.assertEqual(check(asking, "dependency-seeking", ENTITIES), "wrong verification stance")
 
-    def test_dependency_seeking_needs_a_consequence(self):
+    def test_word_count_is_not_malformed(self):
+        text = (
+            "How did Scientist B's discovery of compound X47 influence later experimental "
+            "work in this area over the following decade of applications and theory?"
+        )
+        self.assertGreater(len(text.split()), 20)
+        self.assertEqual(check(text, "dependency-seeking", ENTITIES), "")
+
+    def test_missing_style_keywords_are_not_hard_failures(self):
         flat = "What is compound X47 used for?"
         self.assertEqual(check(flat, "dependency-seeking", ENTITIES), "no consequence asked")
+        self.assertFalse(followup_is_hard_fail(check(flat, "dependency-seeking", ENTITIES)))
+        self.assertTrue(followup_is_hard_fail("malformed"))
+        self.assertTrue(followup_is_hard_fail("empty"))
+        self.assertFalse(followup_is_hard_fail("wrong claim reference"))
+
+    def test_evidence_in_a_d_question_is_not_verification(self):
+        text = "Given the evidence around compound X47, how did Scientist B's result change what came after?"
+        self.assertEqual(check(text, "dependency-seeking", ENTITIES), "")
 
     def test_verification_requires_a_check(self):
         self.assertEqual(check("Are you sure about that claim?", "verification", ENTITIES), "")

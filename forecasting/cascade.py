@@ -27,7 +27,7 @@ BATCH = DIR / "batch_results.jsonl"
 TREE = DIR / "cascade_tree.jsonl"
 LABELS = DIR / "cascade_labels.jsonl"
 PARTIAL_RUN = DIR / "results" / "cascade_partial_run.json"
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 HALL = "Overall label: Hallucinating"
 RESPONSE_LABELS = ("drop", "correct", "repeat", "depend")
@@ -149,10 +149,19 @@ LABEL_HINTS = {
 SEED_STATE = "persisted"
 SEED_LABEL = "repeat"
 
+# Strong verification cues. Used to *block* D/N questions that are actually V.
 VERIFY = re.compile(
-    r"\b(sure|verify|confirm|double[- ]check|certain|accurate|evidence|source|cite|reconsider)\b",
+    r"\b((are you )?sure|verify|confirm|double[- ]check|reconsider)\b",
     re.I,
 )
+# Broader cues. Verification drafts should hit one of these; missing one is a
+# style warning, not a reason to throw the question away.
+VERIFY_V = re.compile(
+    r"\b(sure|verify|confirm|double[- ]check|certain|accurate|reconsider|"
+    r"support|check|true|really|evidence|source|how do you know)\b",
+    re.I,
+)
+FOLLOWUP_HARD_FAIL = ("empty", "malformed", "reveals the answer")
 REVEAL = re.compile(
     r"\b(actually|in fact,|that'?s (wrong|incorrect|false)|you'?re (wrong|mistaken)|the correct answer is)\b",
     re.I,
@@ -282,17 +291,37 @@ def names(text: str, entities: list[str]) -> bool:
     return False
 
 
+def followup_is_hard_fail(why: str) -> bool:
+    """Only empty text, no question mark, or leaking the answer discard a draft."""
+    return (why or "") in FOLLOWUP_HARD_FAIL
+
+
 def check(text: str, cat: str, entities: list[str]) -> str:
-    _, verify, entity, effect = CATS[cat]
-    if not text or "?" not in text or len(text.split()) > 45:
+    """Return a problem string, or '' if the follow-up is fine.
+
+    Hard failures (empty / no '?' / reveals the answer) make the pipeline
+    retry, then use backup(). Keyword style mismatches are logged on
+    rejected_* but the drafted question is kept. The old 45-word cap and
+    entity-substring gate were discarding most D drafts.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "empty"
+    if "?" not in raw:
         return "malformed"
-    if REVEAL.search(text):
+    if REVEAL.search(raw):
         return "reveals the answer"
-    if bool(VERIFY.search(text)) != verify and (verify or VERIFY.search(text)):
+    _, verify, entity, effect = CATS[cat]
+    if cat == "verification":
+        if not VERIFY_V.search(raw):
+            return "wrong verification stance"
+    elif VERIFY.search(raw):
         return "wrong verification stance"
-    if entity is not None and names(text, entities) != entity:
+    if entity is not None and names(raw, entities) != entity:
         return "wrong claim reference"
-    return "no consequence asked" if effect and not EFFECT.search(text) else ""
+    if effect and not EFFECT.search(raw):
+        return "no consequence asked"
+    return ""
 
 
 def backup(cat: str, entities: list[str], state: str) -> str:

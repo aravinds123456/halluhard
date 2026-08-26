@@ -42,6 +42,7 @@ from cascade import (
     branch_id,
     check,
     derive_branch_outcome,
+    followup_is_hard_fail,
     normalize_category,
     path_key,
     prompt_count,
@@ -173,13 +174,25 @@ def _label_from_payload(payload) -> tuple[str | None, str]:
     return parse_judge_label(text), text[:300]
 
 
-def _judge_turn(question: str, claim: str, answer: str, messages: list[dict], reply: str, dry_run: bool) -> tuple[str, str, str]:
+def _judge_turn(
+    question: str, claim: str, answer: str, messages: list[dict], reply: str, dry_run: bool,
+    *, hallucinated: bool = True,
+) -> tuple[str, str, str]:
     if dry_run:
         return "drop", "dry-run", "ok"
+    claim_kind = (
+        "seed false claim (this seed answer was judged Hallucinating)"
+        if hallucinated
+        else (
+            "seed claim (this seed answer was judged Not Hallucinating; "
+            "do not treat it as false by default)"
+        )
+    )
     prompt = fill_prompt(
         "turn_label",
         q=question[:1500], claim=claim, a=answer[:2500],
-        hist=history(messages), last=reply[:2500],
+        hist=history(messages), last=reply[:8000],
+        claim_kind=claim_kind,
     )
     payload = gpt(prompt)
     label, reason = _label_from_payload(payload)
@@ -224,14 +237,17 @@ def _resolve_categories(raw: str) -> list[str]:
 
 
 def _draft_follow_up(question, claim, messages, label, cat, entities, dry_run):
-    ask, why = backup(cat, entities, {
+    """Draft a follow-up. Keep the LLM text unless it is empty, not a question, or leaks the answer."""
+    fallback = backup(cat, entities, {
         "correct": "corrected",
         "repeat": "persisted",
         "depend": "new_hallucination",
         "drop": "not_applicable",
-    }.get(label, "persisted")), "dry-run" if dry_run else ""
+    }.get(label, "persisted"))
     if dry_run:
-        return ask, why
+        return fallback, "dry-run", "backup"
+    last_usable = None
+    last_why = "empty"
     for _ in range(2):
         drafted = str(gpt(fill_prompt(
             "draft_follow_up",
@@ -239,9 +255,15 @@ def _draft_follow_up(question, claim, messages, label, cat, entities, dry_run):
             state=label, hint=hint_for(label), cat=cat, rule=CATS[cat][0],
             intent=FOLLOWUP_TYPE_DESCRIPTIONS[cat],
         )).get("follow_up", "")).strip()
-        if not (why := check(drafted, cat, entities)):
-            return drafted, why
-    return ask, why
+        why = check(drafted, cat, entities)
+        last_why = why
+        if drafted and not followup_is_hard_fail(why):
+            last_usable = (drafted, why)
+            if not why:
+                return drafted, "", "draft"
+    if last_usable:
+        return last_usable[0], last_usable[1], "draft"
+    return fallback, last_why or "empty", "backup"
 
 
 def _messages_from_record(question: str, first: str, record: dict) -> list[dict]:
@@ -374,13 +396,16 @@ def cmd_tree(args) -> None:
                             "turns": turns,
                         }
                         continue
-                    ask, why = _draft_follow_up(
+                    ask, why, source = _draft_follow_up(
                         question, text, parent["messages"], parent["label"], cat, entities, args.dry_run,
                     )
                     messages = parent["messages"] + [{"role": "user", "content": ask}]
                     reply = strip_thinking(chat(messages))
                     messages = messages + [{"role": "assistant", "content": reply}]
-                    label, reason, parse_status = _judge_turn(question, text, first, messages, reply, args.dry_run)
+                    label, reason, parse_status = _judge_turn(
+                        question, text, first, messages, reply, args.dry_run,
+                        hallucinated=is_hall,
+                    )
                     state = display_state(label)
                     record = dict(parent["record"])
                     record.update({
@@ -391,6 +416,7 @@ def cmd_tree(args) -> None:
                         f"turn_reason_{depth}": reason,
                         f"judge_parse_status_{depth}": parse_status,
                         f"rejected_{depth}": why,
+                        f"follow_up_source_{depth}": source,
                     })
                     record["judge_parse_status"] = worst_parse_status(
                         [record.get(f"judge_parse_status_{level}") for level in range(1, depth + 1)]

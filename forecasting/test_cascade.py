@@ -172,7 +172,7 @@ class DesignDefaultTests(unittest.TestCase):
         self.assertEqual(updated["model_answer"], "The radius is 13.02 km.")
         self.assertEqual(updated["gemini_judgement"], "Overall label: Hallucinating")
         self.assertEqual(updated["prompt_ids"]["seed_judge"], "seed_judge.v4")
-        self.assertEqual(updated["prompt_pack_version"], 2)
+        self.assertEqual(updated["prompt_pack_version"], 3)
 
 
 class SamplingTests(unittest.TestCase):
@@ -370,7 +370,7 @@ class PartialRunTests(unittest.TestCase):
             self.assertFalse(any("persisted_active" in json.dumps(row) or "persisted_dormant" in json.dumps(row) for row in lines))
             self.assertTrue(all(row.get("seed_class") in {"hallucinating", "not_hallucinating"} for row in lines))
             self.assertTrue(all(row.get("domain_group") in {"research", "other"} for row in lines))
-            self.assertTrue(all(row.get("prompt_pack_version") == 2 for row in lines))
+            self.assertTrue(all(row.get("prompt_pack_version") == 3 for row in lines))
             self.assertTrue(all("seed_judge.v4" in row.get("prompt_ids", {}).values() for row in lines))
 
 
@@ -509,8 +509,11 @@ class AzureDeploymentTests(unittest.TestCase):
 class AlgoverseWorkflowTests(unittest.TestCase):
     def test_prompts_are_loaded_from_versioned_json(self):
         from prompts_pack import fill_prompt, prompt_ids, prompt_pack_version, prompt_text
-        self.assertEqual(prompt_pack_version(), 2)
+        self.assertEqual(prompt_pack_version(), 3)
         self.assertEqual(prompt_ids()["seed_judge"], "seed_judge.v4")
+        self.assertEqual(prompt_ids()["turn_label"], "p_turn.v2")
+        self.assertEqual(prompt_ids()["draft_follow_up"], "p_draft.v2")
+        self.assertIn("use DEPEND, not REPEAT", prompt_text("turn_label"))
         self.assertIn("without support", prompt_text("seed_judge"))
         self.assertIn("Do not aim for any hallucination rate", prompt_text("seed_judge"))
         filled = fill_prompt("seed_judge", question="Q?", answer="A.")
