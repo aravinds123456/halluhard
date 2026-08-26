@@ -185,57 +185,48 @@ class SamplingTests(unittest.TestCase):
             ),
         }
 
-    def test_hundred_seeds_split_50_50_hall_and_research_vs_other(self):
+    def test_hundred_hallucinating_seeds_split_research_vs_other(self):
         seeds = []
         qid = 0
-        for hall in (True, False):
-            for domain, start in (("research", 0), ("legal", 100000), ("medical", 200000)):
-                for i in range(40):
-                    seeds.append(self._labeled(start + qid, domain, hall))
-                    qid += 1
+        for domain, start in (("research", 0), ("legal", 100000), ("medical", 200000)):
+            for i in range(80):
+                seeds.append(self._labeled(start + qid, domain, True))
+                qid += 1
         taken = sample_seeds(seeds, 100)
         self.assertEqual(len(taken), 100)
-        hall_n = sum(1 for s in taken if s["gemini_judgement"].startswith("Overall label: Hallucinating"))
+        self.assertTrue(all(s["gemini_judgement"].startswith("Overall label: Hallucinating") for s in taken))
         research_n = sum(1 for s in taken if domain_of(s) == "research")
         other_n = sum(1 for s in taken if domain_of(s) in {"legal", "medical"})
         legal_n = sum(1 for s in taken if domain_of(s) == "legal")
         medical_n = sum(1 for s in taken if domain_of(s) == "medical")
-        self.assertEqual(hall_n, 50)
         self.assertEqual(research_n, 50)
         self.assertEqual(other_n, 50)
         self.assertGreaterEqual(legal_n, 20)
         self.assertGreaterEqual(medical_n, 20)
 
-    def test_ten_seeds_stay_balanced_on_both_axes(self):
+    def test_ten_seeds_stay_balanced_research_vs_other(self):
         seeds = []
         qid = 0
-        for hall in (True, False):
-            for domain, start in (("research", 0), ("legal", 100000), ("medical", 200000)):
-                for i in range(10):
-                    seeds.append(self._labeled(start + qid, domain, hall))
-                    qid += 1
+        for domain, start in (("research", 0), ("legal", 100000), ("medical", 200000)):
+            for i in range(10):
+                seeds.append(self._labeled(start + qid, domain, True))
+                qid += 1
         taken = sample_seeds(seeds, 10)
-        hall_n = sum(1 for s in taken if s["gemini_judgement"].startswith("Overall label: Hallucinating"))
         research_n = sum(1 for s in taken if domain_of(s) == "research")
-        self.assertEqual(hall_n, 5)
         self.assertEqual(research_n, 5)
+        self.assertEqual(sum(1 for s in taken if domain_of(s) in {"legal", "medical"}), 5)
 
-    def test_fills_when_one_cell_is_short(self):
+    def test_fills_when_research_is_short(self):
         seeds = (
             [self._labeled(i, "research", True) for i in range(5)]
-            + [self._labeled(100000 + i, "legal", True) for i in range(40)]
-            + [self._labeled(200000 + i, "medical", False) for i in range(40)]
-            + [self._labeled(50 + i, "research", False) for i in range(40)]
+            + [self._labeled(100000 + i, "legal", True) for i in range(60)]
+            + [self._labeled(200000 + i, "medical", True) for i in range(60)]
         )
         taken = sample_seeds(seeds, 100)
         self.assertEqual(len(taken), 100)
-        hall_n = sum(1 for s in taken if s["gemini_judgement"].startswith("Overall label: Hallucinating"))
         research_n = sum(1 for s in taken if domain_of(s) == "research")
-        self.assertEqual(hall_n, 45)
-        self.assertGreaterEqual(research_n, 30)
-        self.assertLessEqual(research_n, 50)
-        self.assertTrue(any(domain_of(s) == "legal" for s in taken))
-        self.assertTrue(any(domain_of(s) == "medical" for s in taken))
+        self.assertEqual(research_n, 5)
+        self.assertEqual(sum(1 for s in taken if domain_of(s) in {"legal", "medical"}), 95)
 
     def test_domain_from_halluhard_id_offsets(self):
         self.assertEqual(domain_of({"question_number": 89}), "research")

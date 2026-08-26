@@ -69,13 +69,8 @@ DOMAIN_ORDER = ("research", "legal", "medical")
 OTHER_DOMAINS = ("legal", "medical")
 SEED_CLASSES = ("hallucinating", "not_hallucinating")
 DOMAIN_GROUPS = ("research", "other")
-# Alternate hall/clean and research/other so n=100 is 50/50 on both axes.
-SAMPLE_CELL_ORDER = (
-    ("hallucinating", "research"),
-    ("not_hallucinating", "other"),
-    ("hallucinating", "other"),
-    ("not_hallucinating", "research"),
-)
+# Alternate research vs legal/medical so n=100 is 50/50 on domain group.
+SAMPLE_GROUP_ORDER = ("research", "other")
 
 # category: (instruction, must ask to verify, name the claim entity, must ask consequences)
 # D / N / V only. Accepting and topic-shift are not part of this tree.
@@ -497,72 +492,49 @@ def _plan_row(take: int, have: int) -> dict:
 
 
 def sample_seeds(seeds: list[dict], n: int, rng_seed: int = 42) -> list[dict]:
-    """50/50 Hallucinating vs Not Hallucinating, and 50/50 research vs legal/medical."""
+    """50/50 research vs legal/medical. Caller passes the pool (hallucinating-only for the tree)."""
     rng = random.Random(rng_seed)
-    buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    buckets: dict[str, list[dict]] = defaultdict(list)
     for seed in seeds:
-        buckets[(seed_class(seed), domain_of(seed))].append(seed)
+        buckets[domain_of(seed)].append(seed)
     for bucket in buckets.values():
         rng.shuffle(bucket)
 
-    cursors: dict[tuple[str, str], int] = defaultdict(int)
-    group_rr: dict[tuple[str, str], int] = defaultdict(int)
+    cursors: dict[str, int] = defaultdict(int)
+    other_rr = 0
 
-    def take(cls: str, group: str) -> dict | None:
+    def take(group: str) -> dict | None:
+        nonlocal other_rr
         domains = ("research",) if group == "research" else OTHER_DOMAINS
-        for _ in range(len(domains)):
-            domain = domains[group_rr[(cls, group)] % len(domains)]
-            group_rr[(cls, group)] += 1
-            key = (cls, domain)
-            index = cursors[key]
-            bucket = buckets.get(key, [])
+        start = 0 if group == "research" else other_rr
+        for step in range(len(domains)):
+            domain = domains[(start + step) % len(domains)]
+            if group != "research":
+                other_rr += 1
+            index = cursors[domain]
+            bucket = buckets.get(domain, [])
             if index < len(bucket):
-                cursors[key] = index + 1
+                cursors[domain] = index + 1
                 return bucket[index]
         return None
 
     def take_any() -> dict | None:
-        for cls in SEED_CLASSES:
-            for domain in DOMAIN_ORDER:
-                key = (cls, domain)
-                index = cursors[key]
-                bucket = buckets.get(key, [])
-                if index < len(bucket):
-                    cursors[key] = index + 1
-                    return bucket[index]
+        for domain in DOMAIN_ORDER:
+            index = cursors[domain]
+            bucket = buckets.get(domain, [])
+            if index < len(bucket):
+                cursors[domain] = index + 1
+                return bucket[index]
         return None
 
     selected: list[dict] = []
-    quota: dict[tuple[str, str], int] = defaultdict(int)
-    for i in range(n):
-        quota[SAMPLE_CELL_ORDER[i % 4]] += 1
-    for cell, want in quota.items():
-        for _ in range(want):
-            item = take(*cell)
-            if item is None:
-                break
-            selected.append(item)
-
-    hall_target = n // 2
     research_target = n // 2
     while len(selected) < n:
-        hall_n = sum(1 for seed in selected if seed_class(seed) == "hallucinating")
         research_n = sum(1 for seed in selected if domain_group(seed) == "research")
-        want_hall = "hallucinating" if hall_n < hall_target else "not_hallucinating"
-        want_group = "research" if research_n < research_target else "other"
-        item = None
-        for cls, group in (
-            (want_hall, want_group),
-            (want_hall, "other" if want_group == "research" else "research"),
-            ("not_hallucinating" if want_hall == "hallucinating" else "hallucinating", want_group),
-            (
-                "not_hallucinating" if want_hall == "hallucinating" else "hallucinating",
-                "other" if want_group == "research" else "research",
-            ),
-        ):
-            item = take(cls, group)
-            if item is not None:
-                break
+        want = "research" if research_n < research_target else "other"
+        item = take(want)
+        if item is None:
+            item = take("other" if want == "research" else "research")
         if item is None:
             item = take_any()
         if item is None:

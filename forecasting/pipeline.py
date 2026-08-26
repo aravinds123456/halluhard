@@ -291,10 +291,10 @@ def cmd_tree(args) -> None:
     cats = _resolve_categories(args.categories)
     raw_seeds = [
         r for r in rows(Path(args.seeds))
-        if judged_seed(r) and not r.get("duplicate_answer")
+        if hallucinating(r) and judged_seed(r) and not r.get("duplicate_answer")
     ]
     if not raw_seeds:
-        raise SystemExit(f"No judged seed rows in {args.seeds}")
+        raise SystemExit(f"No hallucinating seed rows in {args.seeds}")
     seeds = sample_seeds(raw_seeds, args.max_seeds)
     plan = sampling_plan(raw_seeds, args.max_seeds)
     out = Path(args.out)
@@ -314,7 +314,7 @@ def cmd_tree(args) -> None:
     print(f"Prompt pack: v{prompt_pack_version()} ids={prompt_ids()}")
     print("Workflow: debug prompts on ~10 examples (--pilot), then scale. Do not send 100+ first.")
     print(
-        "Sampling 50/50 hall vs not, 50/50 research vs legal/medical: "
+        "Sampling hallucinating seeds only, 50/50 research vs legal/medical: "
         + ", ".join(
             f"{name} {plan[name]['selected']}/{plan[name]['available']}"
             for name in (

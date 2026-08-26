@@ -71,7 +71,7 @@ reasoning."
 
 What else to keep
 =================
-- 50/50 Hallucinating vs Not Hallucinating, and 50/50 research vs legal/medical.
+- 50/50 research vs legal/medical among Hallucinating seeds. Not-Hallucinating rows are not tree seeds.
 - Derive branch outcomes from DROP/CORRECT/REPEAT/DEPEND; do not mix vocabularies.
 - Generate seeds with the model under test (GPT-OSS seeds for a GPT-OSS tree).
 - Wilson 95% CIs and the domain split; the formatted PDF was an incomplete sample.
