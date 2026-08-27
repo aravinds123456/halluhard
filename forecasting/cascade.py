@@ -266,6 +266,29 @@ def is_skipped_node(record: dict) -> bool:
     return record.get("node_kind") == "skipped" or bool(record.get("azure_skip_reason"))
 
 
+TURN_RECORD_PREFIXES = ("follow_up_", "future_turn_", "turn_", "rejected_", "judge_parse_status")
+TURN_RECORD_EXCLUDE = {"follow_up_path", "follow_up_mode"}
+
+
+def turn_fields_from_saved(saved: dict) -> dict:
+    """Per-turn fields only. Do not copy follow_up_path (it would shrink child paths)."""
+    return {
+        key: saved[key]
+        for key in saved
+        if key.startswith(TURN_RECORD_PREFIXES) and key not in TURN_RECORD_EXCLUDE
+    }
+
+
+def followup_type_at_level(saved, path, level: int):
+    """Safe path index for --resume. Short/corrupt follow_up_path must not crash."""
+    saved_path = saved.get("follow_up_path") if isinstance(saved, dict) else None
+    if isinstance(saved_path, (list, tuple)) and len(saved_path) >= level:
+        return saved_path[level - 1]
+    if level - 1 < len(path):
+        return path[level - 1]
+    return path[-1] if path else ""
+
+
 def is_azure_content_filter(error: BaseException) -> bool:
     """Azure blocked the completion. Match the 400 body even if the SDK class differs."""
     blob = f"{error} {getattr(error, 'body', '')}".lower()

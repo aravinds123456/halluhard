@@ -57,6 +57,8 @@ from cascade import (
     is_azure_content_filter,
     is_skipped_node,
     content_filter_label_from_error,
+    followup_type_at_level,
+    turn_fields_from_saved,
     seed_class,
     history,
     names,
@@ -326,11 +328,6 @@ def _write_skipped_branch(
         "answer_model": model,
         "judge_model_name": judge_name,
         "enable_thinking": ENABLE_THINKING,
-        "follow_up_mode": path_key(path),
-        "follow_up_path": list(path),
-        "first_follow_up": path[0],
-        "tree_depth": depth,
-        "node_kind": "skipped",
         "question": question,
         "original_answer": first,
         "false_claim": text,
@@ -348,6 +345,11 @@ def _write_skipped_branch(
         "prompt_ids": prompt_ids(),
         **features,
         **record,
+        "follow_up_mode": path_key(path),
+        "follow_up_path": list(path),
+        "first_follow_up": path[0],
+        "tree_depth": depth,
+        "node_kind": "skipped",
     }
     write(out, node, seen)
     print(f"  {path_key(path):<40} SKIP content_filter" + (f" ({label})" if label else ""))
@@ -457,7 +459,7 @@ def cmd_tree(args) -> None:
                             {
                                 "turn": level,
                                 "label": parse_judge_label(str(saved.get(f"turn_label_{level}", "drop"))),
-                                "followup_type": (saved.get("follow_up_path") or path)[level - 1],
+                                "followup_type": followup_type_at_level(saved, path, level),
                                 "state": display_state(
                                     saved.get(f"turn_label_{level}")
                                     or saved.get(f"turn_state_{level}")
@@ -470,11 +472,7 @@ def cmd_tree(args) -> None:
                         by_path[path] = {
                             "messages": _messages_from_record(question, first, saved),
                             "label": turns[-1]["label"] if turns else SEED_LABEL,
-                            "record": {
-                                key: saved[key]
-                                for key in saved
-                                if key.startswith(("follow_up_", "future_turn_", "turn_", "rejected_", "judge_parse_status"))
-                            },
+                            "record": turn_fields_from_saved(saved),
                             "turns": turns,
                         }
                         continue
@@ -544,11 +542,6 @@ def cmd_tree(args) -> None:
                         "answer_model": args.model,
                         "judge_model_name": judge_name,
                         "enable_thinking": ENABLE_THINKING,
-                        "follow_up_mode": path_key(path),
-                        "follow_up_path": list(path),
-                        "first_follow_up": path[0],
-                        "tree_depth": depth,
-                        "node_kind": "leaf" if depth == args.levels else "internal",
                         "question": question,
                         "original_answer": first,
                         "false_claim": text,
@@ -567,6 +560,11 @@ def cmd_tree(args) -> None:
                         "prompt_ids": prompt_ids(),
                         **features,
                         **record,
+                        "follow_up_mode": path_key(path),
+                        "follow_up_path": list(path),
+                        "first_follow_up": path[0],
+                        "tree_depth": depth,
+                        "node_kind": "leaf" if depth == args.levels else "internal",
                     }
                     write(out, node, seen)
                     seen = True

@@ -113,6 +113,48 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(content_filter_label_from_error(err), "MultiSeverity_SexualScore")
         self.assertFalse(is_azure_content_filter(RuntimeError("rate limit")))
 
+    def test_short_follow_up_path_does_not_crash_resume_index(self):
+        from cascade import followup_type_at_level, turn_fields_from_saved
+        path = ("dependency-seeking", "neutral")
+        saved = {"follow_up_path": ["dependency-seeking"], "follow_up_1": "q"}
+        self.assertEqual(followup_type_at_level(saved, path, 1), "dependency-seeking")
+        self.assertEqual(followup_type_at_level(saved, path, 2), "neutral")
+        fields = turn_fields_from_saved({
+            "follow_up_path": ["dependency-seeking"],
+            "follow_up_mode": "dependency-seeking",
+            "follow_up_1": "ask",
+            "future_turn_1": "ans",
+        })
+        self.assertNotIn("follow_up_path", fields)
+        self.assertNotIn("follow_up_mode", fields)
+        self.assertEqual(fields["follow_up_1"], "ask")
+
+    def test_resume_with_short_follow_up_path_does_not_index_error(self):
+        import argparse
+        from pipeline import cmd_tree
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "tree.jsonl"
+            args = argparse.Namespace(
+                categories="all",
+                seeds=str(Path(__file__).resolve().parent / "batch_results.jsonl"),
+                max_seeds=2,
+                levels=2,
+                out=str(out),
+                resume=False,
+                dry_run=True,
+                model="gpt-oss-20b",
+                pilot=False,
+                skip_pilot=True,
+            )
+            cmd_tree(args)
+            rows_ = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            for row in rows_:
+                if row.get("tree_depth") == 2 and row.get("follow_up_path"):
+                    row["follow_up_path"] = row["follow_up_path"][:1]
+            out.write_text("\n".join(json.dumps(row) for row in rows_) + "\n")
+            args.resume = True
+            cmd_tree(args)
+
 
 class DesignDefaultTests(unittest.TestCase):
     def test_default_run_is_hundred_seeds_and_two_levels(self):
