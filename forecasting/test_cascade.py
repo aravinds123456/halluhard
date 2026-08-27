@@ -178,7 +178,7 @@ class LabelTests(unittest.TestCase):
     def test_fresh_deletes_existing_tree_and_rewrites(self):
         import argparse
         from pipeline import TREE_RUNNER, cmd_tree
-        self.assertEqual(TREE_RUNNER, "hall-only-v3")
+        self.assertEqual(TREE_RUNNER, "hall-only-v4")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "tree.jsonl"
             out.write_text('{"branch_id": "stale", "tree_depth": 1}\n')
@@ -224,11 +224,10 @@ class DesignDefaultTests(unittest.TestCase):
 
     def test_seed_judge_treats_unsupported_facts_as_hallucinations(self):
         from generate_seeds import SEED_JUDGE_TEMPLATE, parse_seed_judgement
-        self.assertIn("without support", SEED_JUDGE_TEMPLATE)
-        self.assertIn("wrong, fabricated", SEED_JUDGE_TEMPLATE)
-        self.assertIn("Do not aim for any hallucination rate", SEED_JUDGE_TEMPLATE)
-        self.assertIn("Judge only the ANSWER", SEED_JUDGE_TEMPLATE)
-        self.assertIn("do not score the question", SEED_JUDGE_TEMPLATE.lower())
+        self.assertIn("Hallucinating", SEED_JUDGE_TEMPLATE)
+        self.assertIn("without any supporting citation", SEED_JUDGE_TEMPLATE)
+        self.assertIn("Hedged", SEED_JUDGE_TEMPLATE)
+        self.assertIn("Grounded", SEED_JUDGE_TEMPLATE)
         label, _ = parse_seed_judgement("Overall label: Hallucinating\nReason: invented citation")
         self.assertEqual(label, "Hallucinating")
 
@@ -270,7 +269,7 @@ class DesignDefaultTests(unittest.TestCase):
         self.assertEqual(updated["model_answer"], "The radius is 13.02 km.")
         self.assertEqual(updated["gemini_judgement"], "Overall label: Hallucinating")
         self.assertEqual(updated["prompt_ids"]["seed_judge"], "seed_judge.v4")
-        self.assertEqual(updated["prompt_pack_version"], 3)
+        self.assertEqual(updated["prompt_pack_version"], 4)
 
 
 class SamplingTests(unittest.TestCase):
@@ -460,7 +459,7 @@ class PartialRunTests(unittest.TestCase):
             self.assertFalse(any("persisted_active" in json.dumps(row) or "persisted_dormant" in json.dumps(row) for row in lines))
             self.assertTrue(all(row.get("seed_class") in {"hallucinating", "not_hallucinating"} for row in lines))
             self.assertTrue(all(row.get("domain_group") in {"research", "other"} for row in lines))
-            self.assertTrue(all(row.get("prompt_pack_version") == 3 for row in lines))
+            self.assertTrue(all(row.get("prompt_pack_version") == 4 for row in lines))
             self.assertTrue(all("seed_judge.v4" in row.get("prompt_ids", {}).values() for row in lines))
 
 
@@ -599,13 +598,17 @@ class AzureDeploymentTests(unittest.TestCase):
 class AlgoverseWorkflowTests(unittest.TestCase):
     def test_prompts_are_loaded_from_versioned_json(self):
         from prompts_pack import fill_prompt, prompt_ids, prompt_pack_version, prompt_text
-        self.assertEqual(prompt_pack_version(), 3)
+        self.assertEqual(prompt_pack_version(), 4)
         self.assertEqual(prompt_ids()["seed_judge"], "seed_judge.v4")
-        self.assertEqual(prompt_ids()["turn_label"], "p_turn.v2")
-        self.assertEqual(prompt_ids()["draft_follow_up"], "p_draft.v2")
+        self.assertEqual(prompt_ids()["turn_label"], "p_turn.v3")
+        self.assertEqual(prompt_ids()["draft_follow_up"], "p_draft.v3")
+        self.assertEqual(prompt_ids()["claim"], "p_claim.v2")
+        self.assertEqual(prompt_ids()["claim_control"], "p_claim_control.v2")
         self.assertIn("use DEPEND, not REPEAT", prompt_text("turn_label"))
-        self.assertIn("without support", prompt_text("seed_judge"))
-        self.assertIn("Do not aim for any hallucination rate", prompt_text("seed_judge"))
+        self.assertIn("Hallucinating", prompt_text("seed_judge"))
+        self.assertIn("without any supporting citation", prompt_text("seed_judge"))
+        self.assertIn("Hedged", prompt_text("seed_judge"))
+        self.assertIn("Grounded", prompt_text("seed_judge"))
         filled = fill_prompt("seed_judge", question="Q?", answer="A.")
         self.assertIn("Q?", filled)
         self.assertIn("A.", filled)

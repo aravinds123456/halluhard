@@ -22,7 +22,7 @@ if str(DIR) not in sys.path:
 
 # Printed at the start of every tree run. If this string is missing from stdout,
 # the file on disk is still an old pipeline.py (merge did not land).
-TREE_RUNNER = "hall-only-v3"
+TREE_RUNNER = "hall-only-v4"
 
 from cascade import (
     BATCH,
