@@ -41,6 +41,7 @@ from cascade import (
     prompt_count,
     rows,
     seed_class,
+    with_trajectory,
     wilson,
 )
 
@@ -151,7 +152,7 @@ def records_from_live(tree_path: Path, labels_path: Path) -> list[dict]:
         rec["domain_group"] = rec.get("domain_group") or domain_group(rec)
         if label_row.get("judge_parse_status"):
             rec["judge_parse_status"] = label_row["judge_parse_status"]
-        out.append(with_canonical_turn_states(rec))
+        out.append(with_trajectory(with_canonical_turn_states(rec)))
     return out
 
 
@@ -372,7 +373,20 @@ def headline_findings(records: list[dict]) -> list[str]:
     t1 = turn1_forecast(records)
     if "CORRECT" in t1 and t1["CORRECT"]["n"]:
         n_c, ok = t1["CORRECT"]["n"], t1["CORRECT"]["CORRECT"]
-        findings.append(f"Turn-1 CORRECT forecasts a CORRECT branch: {ok}/{n_c} ({100 * ok / n_c:.0f}%).")
+        findings.append(f"Turn-1 CORRECT forecasts a last-turn CORRECT: {ok}/{n_c} ({100 * ok / n_c:.0f}%).")
+    leaves = [
+        rec for rec in records
+        if "recovered" in rec and (rec.get("node_kind") == "leaf" or rec.get("tree_depth") == 2)
+    ]
+    if leaves:
+        n_leaf = len(leaves)
+        recovered = sum(1 for rec in leaves if rec.get("recovered"))
+        rehall = sum(1 for rec in leaves if rec.get("rehallucinated"))
+        findings.append(
+            f"On {n_leaf} leaf paths, {recovered} recovered (REPEAT/DEPEND then later CORRECT) and "
+            f"{rehall} re-hallucinated (CORRECT/DROP then later REPEAT/DEPEND). "
+            "final_label is the last response, not max severity."
+        )
     sx = strategy_domain_counts(records)
     acc = sx.get("accepting", {})
     if acc:
@@ -488,7 +502,9 @@ def render_html(records: list[dict], meta: dict, path: Path) -> None:
             )
             rows_html.append(
                 f"<tr><td>{html_escape(rec['follow_up_mode'])}</td>{turns}"
-                f"<td><b>{html_escape(rec['final_label'])}</b></td></tr>"
+                f"<td>{html_escape(rec.get('trajectory') or '')}</td>"
+                f"<td><b>{html_escape(rec['final_label'])}</b></td>"
+                f"<td>{html_escape(rec.get('branch_severity') or '')}</td></tr>"
             )
         turn_heads = "".join(f"<th>T{i}</th>" for i in range(1, detected_turns(branches) + 1))
         seed_blocks.append(
@@ -496,7 +512,7 @@ def render_html(records: list[dict], meta: dict, path: Path) -> None:
             f"({html_escape(domain_of({'question_number': qid}))})</h3>"
             f"<p class='claim'>Claim excerpt: {html_escape(claim)}</p>"
             f"<table><thead><tr><th>Strategy</th>{turn_heads}"
-            f"<th>Outcome</th></tr></thead>"
+            f"<th>Trajectory</th><th>Final</th><th>Severity</th></tr></thead>"
             f"<tbody>{''.join(rows_html)}</tbody></table></section>"
         )
 
@@ -817,10 +833,23 @@ def render_report(from_partial: bool, tree_path: Path, labels_path: Path, html_p
         print_table("First-move outcomes (level 1)", count_table(first, "follow_up_mode"), list(CATS))
     if leaves:
         print_table(
-            "Leaf-path outcomes (level 2)",
+            "Leaf-path last-turn outcomes (level 2)",
             count_table(leaves, "follow_up_mode"),
             [path_key(path) for path in leaf_paths()],
         )
+        recovered = sum(1 for rec in leaves if rec.get("recovered"))
+        rehall = sum(1 for rec in leaves if rec.get("rehallucinated"))
+        print(
+            f"Leaf recovery vs re-hallucination: recovered {recovered}/{len(leaves)}, "
+            f"rehallucinated {rehall}/{len(leaves)} "
+            "(final_label = last response, not DEPEND>REPEAT>CORRECT>DROP)"
+        )
+        traj = Counter(rec.get("trajectory") or "" for rec in leaves)
+        if any(traj.values()):
+            print("Leaf trajectories:")
+            for name, n in traj.most_common():
+                if name:
+                    print(f"  {name:<24} {n}")
     if not first:
         print_table(
             "Outcome by follow-up strategy (Wilson 95% CI)",
