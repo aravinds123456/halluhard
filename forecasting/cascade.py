@@ -199,6 +199,10 @@ DEFAULT_TURNS = env_int("NUM_TURNS", 2)
 # Azure GPT-OSS answers; gpt-5-mini still drafts follow-ups and judges.
 DEFAULT_TEST_MODEL = "gpt-oss-20b"
 DEFAULT_OPENAI_JUDGE = "gpt-5-mini"
+# HalluHard serper/webscraper judge is gpt-5-mini-medium (thinking).
+# Extractor and search planner stay gpt-5-mini-minimal.
+DEFAULT_JUDGE_REASONING_EFFORT = "medium"
+DEFAULT_AUX_REASONING_EFFORT = "minimal"
 # Qwen3.5 can think by default. Keep reasoning off unless ENABLE_THINKING=1.
 ENABLE_THINKING = env_str("ENABLE_THINKING", "0").lower() in {"1", "true", "yes", "on"}
 

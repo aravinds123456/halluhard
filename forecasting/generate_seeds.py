@@ -268,7 +268,7 @@ def judge_seed(question: str, answer: str, *, use_web: bool | None = None):
     if judge_backend() == "gemini":
         raw_text = call_gemini(prompt)
     else:
-        raw_text = str(gpt(prompt, as_json=False)).strip()
+        raw_text = str(gpt(prompt, as_json=False, role="judge")).strip()
     label, reason = parse_seed_judgement(raw_text)
     return label, reason, raw_text, None
 
@@ -364,9 +364,12 @@ def main():
             print("Azure temperature: omitted (GPT-OSS often rejects it; set AZURE_SEND_TEMPERATURE=1 to sample)")
     print(f"Judge model: {active_judge_model()}")
     if web_verify.web_flag_disabled():
-        print("Seed evidence: LLM-only (--no-web / CASCADE_WEB=0). Not the paper path.")
+        print("Seed evidence: LLM-only (--no-web / CASCADE_WEB=0). Not the HalluHard paper path.")
     else:
-        print("Seed evidence: Serper snippets + GPT judge (HalluHard structured analysis)")
+        print(
+            "Seed evidence: gpt-5-mini-medium thinking + Serper "
+            "(HalluHard --type serper / webscraper defaults)"
+        )
     print(f"Thinking: {'on' if ENABLE_THINKING else 'off'}")
     print(f"Prompt pack: v{prompt_pack_version()} ids={prompt_ids()}")
     print("Workflow: debug prompts on ~10 examples (--pilot), then scale.")

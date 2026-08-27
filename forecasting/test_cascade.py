@@ -222,6 +222,11 @@ class DesignDefaultTests(unittest.TestCase):
     def test_default_models_are_gptoss_and_gpt5_mini(self):
         self.assertEqual(DEFAULT_TEST_MODEL, "gpt-oss-20b")
         self.assertEqual(DEFAULT_OPENAI_JUDGE, "gpt-5-mini")
+        from cascade import DEFAULT_AUX_REASONING_EFFORT, DEFAULT_JUDGE_REASONING_EFFORT
+        self.assertEqual(DEFAULT_JUDGE_REASONING_EFFORT, "medium")
+        self.assertEqual(DEFAULT_AUX_REASONING_EFFORT, "minimal")
+        from runtime import halluhard_judge_name
+        self.assertEqual(halluhard_judge_name("gpt-5-mini", "medium"), "gpt-5-mini-medium")
         self.assertFalse(ENABLE_THINKING)
         from runtime import uses_azure_answer
         self.assertTrue(uses_azure_answer("gpt-oss-20b"))
@@ -554,7 +559,7 @@ class JudgeRetryTests(unittest.TestCase):
 
         calls = []
 
-        def fake_gpt(prompt, as_json=True):
+        def fake_gpt(prompt, as_json=True, **kwargs):
             calls.append(prompt)
             if "FORMAT REMINDER" in prompt:
                 return "I could not determine a label."
@@ -577,7 +582,7 @@ class JudgeRetryTests(unittest.TestCase):
     def test_retry_can_recover_a_strict_label(self):
         import pipeline
 
-        def fake_gpt(prompt, as_json=True):
+        def fake_gpt(prompt, as_json=True, **kwargs):
             if "FORMAT REMINDER" in prompt:
                 return {"label": "CORRECT", "reason": "retracted the date"}
             return "This is not a REPEAT; the model explicitly corrected itself."
@@ -599,7 +604,7 @@ class JudgeRetryTests(unittest.TestCase):
 
         calls = []
 
-        def fake_gpt(prompt, as_json=True):
+        def fake_gpt(prompt, as_json=True, **kwargs):
             calls.append(prompt)
             return {"label": "DROP", "reason": "unrelated topic"}
 
@@ -685,7 +690,7 @@ class WebVerifyTests(unittest.TestCase):
     def test_supported_textbook_claim_is_not_hallucinating(self):
         import web_verify
 
-        def fake_gpt(prompt, as_json=True):
+        def fake_gpt(prompt, as_json=True, **kwargs):
             if "Extract up to" in prompt:
                 return {"claims": [{"claim": "Vacancies bind excitons in GaAs.", "entities": ["GaAs"]}]}
             return {"verdict": "supported", "reason": "standard semiconductor physics"}
@@ -697,11 +702,13 @@ class WebVerifyTests(unittest.TestCase):
         self.assertFalse(result["hallucinating"])
         self.assertEqual(result["false_claim"], "")
         self.assertEqual(result["method"], "serper")
+        self.assertEqual(result["judge"], "gpt-5-mini-medium")
+        self.assertEqual(result["judge"], "gpt-5-mini-medium")
 
     def test_contradicted_particular_is_the_cascade_claim(self):
         import web_verify
 
-        def fake_gpt(prompt, as_json=True):
+        def fake_gpt(prompt, as_json=True, **kwargs):
             if "Extract up to" in prompt:
                 return {
                     "claims": [
@@ -723,7 +730,7 @@ class WebVerifyTests(unittest.TestCase):
     def test_insufficient_snippets_do_not_invent_a_hallucination(self):
         import web_verify
 
-        def fake_gpt(prompt, as_json=True):
+        def fake_gpt(prompt, as_json=True, **kwargs):
             if "Extract up to" in prompt:
                 return {"claims": [{"claim": "Paper X reports Y=0.42", "entities": ["Paper X"]}]}
             return {"verdict": "insufficient", "reason": "snippets too thin"}
@@ -732,6 +739,23 @@ class WebVerifyTests(unittest.TestCase):
             "q", "a", fake_gpt, search_fn=lambda claim: ("", claim, "timeout")
         )
         self.assertFalse(result["hallucinating"])
+
+    def test_extractor_is_aux_and_snippet_judge_is_thinking(self):
+        import web_verify
+
+        roles = []
+
+        def fake_gpt(prompt, as_json=True, **kwargs):
+            roles.append(kwargs.get("role"))
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "cite X", "entities": ["X"]}]}
+            return {"verdict": "insufficient", "reason": "thin"}
+
+        web_verify.verify_seed_answer(
+            "q", "a", fake_gpt, search_fn=lambda claim: ("snips", claim, None)
+        )
+        self.assertEqual(roles[0], "aux")
+        self.assertIn("judge", roles[1:])
 
     def test_serper_required_unless_disabled(self):
         import web_verify

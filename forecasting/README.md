@@ -58,7 +58,7 @@ Judge labels are parsed **strictly** (`Overall label: DEPEND`, JSON `"label"`, o
 
 - **100** hallucinating seeds × **12** prompts = **1200** GPT-OSS answers (50 research / 50 legal+medical)
 - Answering model: `gpt-oss-20b` on Azure (`TEST_MODEL`, `AZURE_OPENAI_*`)
-- Judge and follow-up writer: `gpt-5-mini` (`OPENAI_LABEL_MODEL`)
+- Judge and follow-up writer: `gpt-5-mini` (`OPENAI_LABEL_MODEL`). The **claim judge** uses HalluHard's `gpt-5-mini-medium` thinking (`OPENAI_JUDGE_REASONING_EFFORT=medium`) plus Serper. Extractor and follow-up drafts stay `gpt-5-mini-minimal`.
 - Seeds are sampled **Hallucinating only**, **50/50 research vs legal/medical** (legal and medical share the non-research half). Not-Hallucinating rows stay in the seed file as a pool, not in the cascade tree.
 
 Teacher-forced token features are skipped on the Azure path (no local logits).
@@ -173,7 +173,9 @@ Do not point `--seeds` at a Qwen file if the tree is GPT-OSS. Do not mix the old
 | `AZURE_OPENAI_DEPLOYMENT` | `TEST_MODEL` | Override deployment name |
 | `AZURE_REASONING_EFFORT` | `low` | Azure GPT-OSS reasoning effort (`low` / `medium` / `high`; empty disables) |
 | `AZURE_SEND_TEMPERATURE` | unset | Set `1` to send `TEMPERATURE`; GPT-OSS often rejects it |
-| `OPENAI_LABEL_MODEL` | `gpt-5-mini` | Judge + follow-up drafts |
+| `OPENAI_LABEL_MODEL` | `gpt-5-mini` | API model for judge + drafts |
+| `OPENAI_JUDGE_REASONING_EFFORT` | `medium` | HalluHard `gpt-5-mini-medium` thinking for claim/turn judges |
+| `OPENAI_AUX_REASONING_EFFORT` | `minimal` | HalluHard extractor / follow-up drafts |
 | `SERPER_API_KEY` | — | Web evidence for seed claims (paper path) |
 | `CASCADE_WEB` | `1` | Set `0` for LLM-only seed claims (`--no-web`) |
 | `MAX_QUESTIONS` | all HalluHard items | Cap seed generation |

@@ -91,9 +91,9 @@ import web_verify
 QWEN = env_str("TEST_MODEL", env_str("QWEN_MODEL", DEFAULT_TEST_MODEL))
 
 
-def gpt(prompt: str, as_json: bool = True):
+def gpt(prompt: str, as_json: bool = True, **kwargs):
     from runtime import gpt as _gpt
-    return _gpt(prompt, as_json=as_json)
+    return _gpt(prompt, as_json=as_json, **kwargs)
 
 
 def load_answer_model(name: str):
@@ -144,7 +144,7 @@ def cmd_judge(args) -> None:
             if row["question_number"] in merged and merged[row["question_number"]].get("gemini_judgement"):
                 continue
             answer = strip_question_prefix(row["question"], row.get("qwen_answer") or row.get("model_answer", ""))
-            verdict = str(gpt(fill_prompt("seed_hallucination", question=row["question"][:2000], answer=answer[:6000], q=row["question"][:2000], a=answer[:6000]), False)).strip()
+            verdict = str(gpt(fill_prompt("seed_hallucination", question=row["question"][:2000], answer=answer[:6000], q=row["question"][:2000], a=answer[:6000]), False, role="judge")).strip()
             if not verdict.startswith("Overall label:"):
                 verdict = (
                     f"Overall label: {'Hallucinating' if 'Hallucinating' in verdict else 'Not Hallucinating'}\n{verdict}"
@@ -175,7 +175,7 @@ def _extract_claim(
             return "", [], result
         return result.get("false_claim") or "", result.get("entities") or [], result
     prompt_name = "claim" if hallucinated else "claim_control"
-    claim = gpt(fill_prompt(prompt_name, question=question[:1500], answer=answer[:3000], q=question[:1500], a=answer[:3000]))
+    claim = gpt(fill_prompt(prompt_name, question=question[:1500], answer=answer[:3000], q=question[:1500], a=answer[:3000]), role="aux")
     text = strip_thinking(str(claim.get("claim", "")))[:800]
     entities = [str(e) for e in claim.get("entities", [])][:4]
     return text, entities, None
@@ -221,11 +221,11 @@ def _judge_turn(
         last=reply[:8000],
         claim_kind=claim_kind,
     )
-    payload = gpt(prompt)
+    payload = gpt(prompt, role="judge")
     label, reason = _label_from_payload(payload)
     if label:
         return label, reason, "ok"
-    payload = gpt(prompt + "\n\n" + JUDGE_FORMAT_REMINDER)
+    payload = gpt(prompt + "\n\n" + JUDGE_FORMAT_REMINDER, role="judge")
     label, reason = _label_from_payload(payload)
     if label:
         return label, reason, "retried"
@@ -303,7 +303,7 @@ def _draft_follow_up(question, claim, messages, label, cat, entities, dry_run):
             cat=cat,
             rule=CATS[cat][0],
             intent=FOLLOWUP_TYPE_DESCRIPTIONS[cat],
-        )).get("follow_up", "")).strip()
+        ), role="aux").get("follow_up", "")).strip()
         why = check(drafted, cat, entities)
         last_why = why
         if drafted and not followup_is_hard_fail(why):
@@ -433,9 +433,9 @@ def cmd_tree(args) -> None:
     if args.dry_run:
         print("Seed claims: dry-run stub (Serper not called)")
     elif web_verify.web_flag_disabled():
-        print("Seed claims: LLM extract (--no-web). Not the paper path.")
+        print("Seed claims: LLM extract (--no-web). Not the HalluHard paper path.")
     else:
-        print("Seed claims: Serper-verified false particular (HalluHard structured analysis)")
+        print("Seed claims: gpt-5-mini-medium thinking + Serper (HalluHard serper/webscraper)")
     cats = _resolve_categories(args.categories)
     raw_seeds = [
         r for r in rows(Path(args.seeds))

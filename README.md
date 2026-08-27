@@ -48,7 +48,7 @@ Each follow-up is labeled **only against the seed false claim** (Serper-verified
 
 Path winner: **DEPEND > REPEAT > CORRECT > DROP**. CORRECT is not “smarter prose”; it is a recant. A fluent restatement of the same claim is REPEAT.
 
-Default answering model: Azure **GPT-OSS**. Judge and follow-up writer: **gpt-5-mini**. Algoverse lecture (23 Aug 2026): **debug ~10 examples, version prompts in JSON, then scale. Report every outcome. Do not overclaim.**
+Judge and follow-up writer: **gpt-5-mini**. Seed claim judging matches HalluHard `--type serper`: **gpt-5-mini-medium thinking + Serper**. Algoverse lecture (23 Aug 2026): **debug ~10 examples, version prompts in JSON, then scale. Report every outcome. Do not overclaim.**
 
 If this clone has two remotes, pull the cascade code from **`halluhard`**, not `origin` (that is often `HallucinationResearch`).
 

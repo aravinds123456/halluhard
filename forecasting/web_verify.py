@@ -17,7 +17,7 @@ import os
 import sys
 from typing import Any, Callable
 
-from cascade import env_str
+from cascade import DEFAULT_JUDGE_REASONING_EFFORT, env_str
 from prompts_pack import fill_prompt
 
 # forecasting/web_verify.py -> repo root, so `import libs.serper` works.
@@ -31,6 +31,17 @@ SEARCH_CHARS = 300
 
 GptFn = Callable[..., Any]
 SearchFn = Callable[[str], tuple[str, str, str | None]]
+
+
+def invoke_gpt(gpt_fn: GptFn, prompt: str, *, role: str = "judge", as_json: bool = True):
+    """Call gpt_fn with HalluHard effort split; tests may omit the extra kwargs."""
+    try:
+        return gpt_fn(prompt, as_json=as_json, role=role)
+    except TypeError:
+        try:
+            return gpt_fn(prompt, as_json=as_json)
+        except TypeError:
+            return gpt_fn(prompt)
 
 
 def web_flag_disabled() -> bool:
@@ -114,13 +125,15 @@ def _as_dict(payload: Any) -> dict:
 
 def extract_candidates(question: str, answer: str, gpt_fn: GptFn, max_claims: int = MAX_CLAIMS) -> list[dict]:
     payload = _as_dict(
-        gpt_fn(
+        invoke_gpt(
+            gpt_fn,
             fill_prompt(
                 "claim_candidates",
                 question=question[:1500],
                 answer=answer[:4000],
                 max_claims=str(max_claims),
-            )
+            ),
+            role="aux",
         )
     )
     raw_claims = payload.get("claims")
@@ -145,12 +158,14 @@ def extract_candidates(question: str, answer: str, gpt_fn: GptFn, max_claims: in
 
 def judge_claim_against_snippets(claim: str, snippets: str, gpt_fn: GptFn) -> dict:
     payload = _as_dict(
-        gpt_fn(
+        invoke_gpt(
+            gpt_fn,
             fill_prompt(
                 "web_claim_judge",
                 claim=claim[:800],
                 snippets=(snippets or "No search results found.")[:6000],
-            )
+            ),
+            role="judge",
         )
     )
     verdict = str(payload.get("verdict") or "insufficient").strip().lower()
@@ -220,6 +235,7 @@ def verify_seed_answer(
         entities = []
     return {
         "method": "serper",
+        "judge": f"gpt-5-mini-{DEFAULT_JUDGE_REASONING_EFFORT}",
         "hallucinating": hallucinating,
         "false_claim": false_claim,
         "entities": entities,

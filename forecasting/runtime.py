@@ -7,6 +7,8 @@ import sys
 import time
 
 from cascade import (
+    DEFAULT_AUX_REASONING_EFFORT,
+    DEFAULT_JUDGE_REASONING_EFFORT,
     DEFAULT_OPENAI_JUDGE,
     DEFAULT_TEST_MODEL,
     ENABLE_THINKING,
@@ -22,7 +24,16 @@ DEFAULT_MAX_TOKENS = 32768
 MAX_NEW_TOKENS = env_int("MAX_TOKENS", env_int("MAX_NEW_TOKENS", DEFAULT_MAX_TOKENS))
 JUDGE_MODEL_NAME = env_str("JUDGE_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = env_str("OPENAI_LABEL_MODEL", DEFAULT_OPENAI_JUDGE)
-OPENAI_REASONING_EFFORT = env_str("OPENAI_REASONING_EFFORT", "minimal")
+# HalluHard --type serper/webscraper: judge=gpt-5-mini-medium, extractor=gpt-5-mini-minimal.
+OPENAI_JUDGE_REASONING_EFFORT = env_str(
+    "OPENAI_JUDGE_REASONING_EFFORT",
+    env_str("OPENAI_REASONING_EFFORT", DEFAULT_JUDGE_REASONING_EFFORT),
+)
+OPENAI_AUX_REASONING_EFFORT = env_str(
+    "OPENAI_AUX_REASONING_EFFORT", DEFAULT_AUX_REASONING_EFFORT
+)
+# Back-compat alias used by older call sites / tests.
+OPENAI_REASONING_EFFORT = OPENAI_JUDGE_REASONING_EFFORT
 
 tokenizer = None
 model = None
@@ -563,13 +574,24 @@ def _uses_responses_api(name: str) -> bool:
     return lowered.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
-def _openai_text(client, prompt: str, as_json: bool) -> str:
+def halluhard_judge_name(model: str | None = None, effort: str | None = None) -> str:
+    """Registry id matching judging_pipeline (gpt-5-mini-medium + Serper)."""
+    model = (model or OPENAI_MODEL).strip() or DEFAULT_OPENAI_JUDGE
+    effort = (effort or OPENAI_JUDGE_REASONING_EFFORT).strip()
+    if model == "gpt-5-mini" and effort:
+        return f"gpt-5-mini-{effort}"
+    if effort:
+        return f"{model}-{effort}"
+    return model
+
+
+def _openai_text(client, prompt: str, as_json: bool, reasoning_effort: str) -> str:
     """GPT-5 rejects temperature=0 on chat completions; use the Responses API."""
     if _uses_responses_api(OPENAI_MODEL):
         kwargs = {
             "model": OPENAI_MODEL,
             "input": prompt,
-            "reasoning": {"effort": OPENAI_REASONING_EFFORT},
+            "reasoning": {"effort": reasoning_effort},
         }
         if as_json:
             kwargs["text"] = {"format": {"type": "json_object"}}
@@ -586,12 +608,16 @@ def _openai_text(client, prompt: str, as_json: bool) -> str:
     ).strip()
 
 
-def gpt(prompt: str, as_json: bool = True):
+def gpt(prompt: str, as_json: bool = True, *, reasoning_effort: str | None = None, role: str = "judge"):
     from openai import OpenAI
 
     if not os.environ.get("OPENAI_API_KEY", "").strip():
         raise SystemExit("Set OPENAI_API_KEY")
-    reply = _openai_text(OpenAI(), prompt, as_json=as_json)
+    if reasoning_effort is None:
+        reasoning_effort = (
+            OPENAI_JUDGE_REASONING_EFFORT if role == "judge" else OPENAI_AUX_REASONING_EFFORT
+        )
+    reply = _openai_text(OpenAI(), prompt, as_json=as_json, reasoning_effort=reasoning_effort)
     if as_json:
         import json
         return json.loads(reply or "{}")
@@ -601,7 +627,7 @@ def gpt(prompt: str, as_json: bool = True):
 def active_judge_model() -> str:
     if judge_backend() == "gemini":
         return JUDGE_MODEL_NAME
-    return OPENAI_MODEL
+    return halluhard_judge_name()
 
 
 def setup_gemini():
