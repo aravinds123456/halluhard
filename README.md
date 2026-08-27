@@ -1,5 +1,7 @@
 # HalluHard
 
+**Cascade code and JSON are in [`forecasting/`](forecasting/)** — seeds, D/N/V trees, and `forecasting/results/` (including `rejudge_pool.jsonl`). Open that folder; it is not a separate GitHub page.
+
 A hard multi-turn hallucination **benchmark** ([paper](https://arxiv.org/abs/2602.01031), [halluhard.com](https://halluhard.com/)), plus a **cascade experiment** in this checkout that reuses the same questions.
 
 ![HalluHard open vs proprietary models](pics/halluhard_vertical_bar_open_vs_prop.png)

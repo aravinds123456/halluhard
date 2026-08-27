@@ -11,6 +11,11 @@ __pycache__/
 **/results/*.json
 !**/results/.gitkeep
 
+# Cascade run artifacts should appear on GitHub main (rejudge pool, experiment log, pilot).
+!forecasting/results/*.jsonl
+!forecasting/results/*.json
+!forecasting/results/.gitkeep
+
 !**/data/*.jsonl
 **/data/*.json
 !**/data/.gitkeep
