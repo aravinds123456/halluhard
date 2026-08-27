@@ -27,7 +27,7 @@ BATCH = DIR / "batch_results.jsonl"
 TREE = DIR / "cascade_tree.jsonl"
 LABELS = DIR / "cascade_labels.jsonl"
 PARTIAL_RUN = DIR / "results" / "cascade_partial_run.json"
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 
 HALL = "Overall label: Hallucinating"
 RESPONSE_LABELS = ("drop", "correct", "repeat", "depend")
@@ -46,6 +46,9 @@ BRANCH_OUTCOME_BY_LABEL = {
     "correct": "CORRECT",
     "drop": "DROP",
 }
+# REPEAT/DEPEND are still using the seed lie; CORRECT/DROP have left it.
+ENTRENCH_LABELS = frozenset({"repeat", "depend"})
+CLEAR_LABELS = frozenset({"correct", "drop"})
 # Old HallucinationResearchTest / formatted-PDF aliases. Live runs do not use them.
 LEGACY_TURN_STATE = {
     "persisted_active": "DEPEND",
@@ -413,15 +416,49 @@ def hint_for(label_or_state: str) -> str:
     return STATES[SEED_STATE]
 
 
+def turns_from_record(record: dict) -> list[dict]:
+    """Per-response labels already stored on a tree row."""
+    turns = []
+    levels = record.get("levels") or 12
+    try:
+        levels = int(levels)
+    except (TypeError, ValueError):
+        levels = 12
+    for n in range(1, levels + 1):
+        raw = record.get(f"turn_label_{n}")
+        if raw is None or str(raw).strip() == "":
+            raw = record.get(f"turn_state_{n}")
+        if raw is None or str(raw).strip() == "":
+            continue
+        turns.append({"turn": n, "label": raw})
+    return turns
+
+
 def derive_branch_outcome(turns: list[dict]) -> dict:
+    """Last-turn final_label; severity is max(DEPEND > REPEAT > CORRECT > DROP).
+
+    CORRECT is not absorbing: DEPEND→CORRECT is recovery, CORRECT→DEPEND is
+    re-hallucination. Both used to collapse to DEPEND under severity-only
+    aggregation.
+    """
     labels = [parse_judge_label(str(turn.get("label", ""))) for turn in turns]
     parsed = [label for label in labels if label in RESPONSE_LABELS]
     label_counts = {label: parsed.count(label) for label in RESPONSE_LABELS}
-    outcome = "UNPARSED" if not parsed else "DROP"
+    severity = "UNPARSED" if not parsed else "DROP"
     for label in LABEL_PRECEDENCE:
         if label_counts[label]:
-            outcome = BRANCH_OUTCOME_BY_LABEL[label]
+            severity = BRANCH_OUTCOME_BY_LABEL[label]
             break
+    final = "UNPARSED" if not parsed else BRANCH_OUTCOME_BY_LABEL[parsed[-1]]
+    recovered = any(
+        later == "correct" and any(earlier in ENTRENCH_LABELS for earlier in parsed[:index])
+        for index, later in enumerate(parsed)
+    )
+    rehallucinated = any(
+        later in ENTRENCH_LABELS and any(earlier in CLEAR_LABELS for earlier in parsed[:index])
+        for index, later in enumerate(parsed)
+    )
+    trajectory = ">".join(BRANCH_OUTCOME_BY_LABEL[label] for label in parsed)
 
     def first_turn_with(label: str):
         for turn in turns:
@@ -430,13 +467,48 @@ def derive_branch_outcome(turns: list[dict]) -> dict:
         return None
 
     return {
-        "branch_outcome": outcome,
-        "final_label": outcome,
+        "branch_outcome": final,
+        "final_label": final,
+        "branch_severity": severity,
+        "ever_depended": "depend" in parsed,
+        "ever_corrected": "correct" in parsed,
+        "recovered": recovered,
+        "rehallucinated": rehallucinated,
+        "trajectory": trajectory,
         "label_counts": label_counts,
         "first_depend_turn": first_turn_with("depend"),
         "first_correct_turn": first_turn_with("correct"),
         "first_repeat_turn": first_turn_with("repeat"),
     }
+
+
+def trajectory_fields(derived: dict) -> dict:
+    return {
+        "branch_outcome": derived["final_label"],
+        "final_label": derived["final_label"],
+        "branch_severity": derived["branch_severity"],
+        "ever_depended": derived["ever_depended"],
+        "ever_corrected": derived["ever_corrected"],
+        "recovered": derived["recovered"],
+        "rehallucinated": derived["rehallucinated"],
+        "trajectory": derived["trajectory"],
+        "label_counts": derived["label_counts"],
+        "first_depend_turn": derived["first_depend_turn"],
+        "first_correct_turn": derived["first_correct_turn"],
+        "first_repeat_turn": derived["first_repeat_turn"],
+    }
+
+
+def with_trajectory(record: dict) -> dict:
+    """Recompute last-turn final_label from stored turn states (no model calls)."""
+    if is_skipped_node(record):
+        return record
+    turns = turns_from_record(record)
+    if not turns:
+        return record
+    out = dict(record)
+    out.update(trajectory_fields(derive_branch_outcome(turns)))
+    return out
 
 
 def judged_seed(record: dict) -> bool:

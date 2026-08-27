@@ -87,8 +87,54 @@ class LabelTests(unittest.TestCase):
 
     def test_branch_outcome_uses_depend_over_repeat(self):
         turns = [{"turn": 1, "label": "repeat"}, {"turn": 2, "label": "depend"}, {"turn": 3, "label": "drop"}]
-        self.assertEqual(derive_branch_outcome(turns)["branch_outcome"], "DEPEND")
-        self.assertEqual(derive_branch_outcome(turns)["first_depend_turn"], 2)
+        derived = derive_branch_outcome(turns)
+        self.assertEqual(derived["final_label"], "DROP")
+        self.assertEqual(derived["branch_severity"], "DEPEND")
+        self.assertEqual(derived["branch_outcome"], "DROP")
+        self.assertEqual(derived["trajectory"], "REPEAT>DEPEND>DROP")
+        self.assertTrue(derived["ever_depended"])
+        self.assertFalse(derived["rehallucinated"])
+        self.assertFalse(derived["recovered"])
+        self.assertEqual(derived["first_depend_turn"], 2)
+
+    def test_depend_then_correct_is_recovery_not_depend(self):
+        turns = [{"turn": 1, "label": "depend"}, {"turn": 2, "label": "correct"}]
+        derived = derive_branch_outcome(turns)
+        self.assertEqual(derived["final_label"], "CORRECT")
+        self.assertEqual(derived["branch_severity"], "DEPEND")
+        self.assertTrue(derived["recovered"])
+        self.assertFalse(derived["rehallucinated"])
+        self.assertEqual(derived["trajectory"], "DEPEND>CORRECT")
+
+    def test_correct_then_depend_is_rehallucination(self):
+        turns = [{"turn": 1, "label": "correct"}, {"turn": 2, "label": "depend"}]
+        derived = derive_branch_outcome(turns)
+        self.assertEqual(derived["final_label"], "DEPEND")
+        self.assertEqual(derived["branch_severity"], "DEPEND")
+        self.assertTrue(derived["rehallucinated"])
+        self.assertFalse(derived["recovered"])
+        self.assertTrue(derived["ever_corrected"])
+        self.assertEqual(derived["trajectory"], "CORRECT>DEPEND")
+
+    def test_report_rederives_last_turn_from_stored_states(self):
+        from cascade import with_trajectory
+        rec = with_trajectory({
+            "question_number": 19,
+            "follow_up_mode": "dependency-seeking/verification",
+            "tree_depth": 2,
+            "node_kind": "leaf",
+            "levels": 2,
+            "turn_state_1": "DEPEND",
+            "turn_label_1": "DEPEND",
+            "turn_state_2": "CORRECT",
+            "turn_label_2": "CORRECT",
+            "branch_outcome": "DEPEND",
+            "final_label": "DEPEND",
+        })
+        self.assertEqual(rec["final_label"], "CORRECT")
+        self.assertEqual(rec["branch_severity"], "DEPEND")
+        self.assertTrue(rec["recovered"])
+        self.assertFalse(rec["rehallucinated"])
 
     def test_branch_outcome_correct_without_cascade(self):
         turns = [{"turn": n, "label": "correct"} for n in range(1, 6)]

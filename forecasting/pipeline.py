@@ -42,6 +42,7 @@ from cascade import (
     branch_id,
     check,
     derive_branch_outcome,
+    trajectory_fields,
     normalize_category,
     path_key,
     prompt_count,
@@ -533,11 +534,7 @@ def cmd_tree(args) -> None:
                         "domain_group": domain_group(seed),
                         "entities": entities,
                         "levels": args.levels,
-                        "branch_outcome": derived["branch_outcome"],
-                        "final_label": derived["final_label"],
-                        "label_counts": derived["label_counts"],
-                        "first_depend_turn": derived["first_depend_turn"],
-                        "first_correct_turn": derived["first_correct_turn"],
+                        **trajectory_fields(derived),
                         "prompt_pack_version": prompt_pack_version(),
                         "prompt_ids": prompt_ids(),
                         **features,
@@ -565,11 +562,20 @@ def cmd_tree(args) -> None:
                             "tree_depth": depth,
                             "reason": "derived from per-turn DROP/CORRECT/REPEAT/DEPEND labels",
                             "final_label": derived["final_label"],
-                            "derived_label": derived["branch_outcome"],
+                            "derived_label": derived["final_label"],
+                            "branch_severity": derived["branch_severity"],
+                            "ever_depended": derived["ever_depended"],
+                            "ever_corrected": derived["ever_corrected"],
+                            "recovered": derived["recovered"],
+                            "rehallucinated": derived["rehallucinated"],
+                            "trajectory": derived["trajectory"],
                             "label_counts": derived["label_counts"],
                             "judge_parse_status": record["judge_parse_status"],
                         }, Path(LABELS).exists() or seen)
-                    print(f"  {path_key(path):<40} {state} -> {derived['branch_outcome']}")
+                    print(
+                        f"  {path_key(path):<40} {derived['trajectory']:<24} "
+                        f"final={derived['final_label']:<8} sev={derived['branch_severity']}"
+                    )
     if getattr(args, "pilot", False) and not args.dry_run:
         write_pilot_stage("tree", n=len(seeds), out=str(out), model=args.model)
         print("Recorded 10-example tree-prompt debug in forecasting/results/pilot.json")
@@ -590,7 +596,7 @@ def cmd_label(args) -> None:
             label = parse_judge_label(str(row.get(f"turn_label_{n}", row.get(f"turn_state_{n}", ""))))
             turns.append({"turn": n, "label": label or "unparsed"})
         derived = derive_branch_outcome(turns)
-        outcome = derived["branch_outcome"]
+        outcome = derived["final_label"]
         reason = "derived from per-turn DROP/CORRECT/REPEAT/DEPEND labels"
         if args.llm_label:
             blob = "\n\n".join(
@@ -615,7 +621,13 @@ def cmd_label(args) -> None:
             "follow_up_mode": row["follow_up_mode"],
             "reason": reason,
             "final_label": outcome,
-            "derived_label": derived["branch_outcome"],
+            "derived_label": derived["final_label"],
+            "branch_severity": derived["branch_severity"],
+            "ever_depended": derived["ever_depended"],
+            "ever_corrected": derived["ever_corrected"],
+            "recovered": derived["recovered"],
+            "rehallucinated": derived["rehallucinated"],
+            "trajectory": derived["trajectory"],
             "label_counts": derived["label_counts"],
         }, seen)
         seen = True
