@@ -260,6 +260,11 @@ def write(path: Path, record: dict, append: bool) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def is_skipped_node(record: dict) -> bool:
+    """Azure content_filter (or similar) skip. Not a scored DROP/CORRECT/REPEAT/DEPEND row."""
+    return record.get("node_kind") == "skipped" or bool(record.get("azure_skip_reason"))
+
+
 def strip_thinking(text: str) -> str:
     cleaned = THINK_PATTERN.sub("", text or "")
     cleaned = re.sub(r"</?think>", "", cleaned, flags=re.I)

@@ -443,6 +443,48 @@ def is_deployment_missing(error: BaseException) -> bool:
     return "DeploymentNotFound" in text or code == "DeploymentNotFound"
 
 
+class AzureContentFilterError(RuntimeError):
+    """Azure blocked the completion. Skip this node; do not abort the tree."""
+
+    def __init__(self, message: str = "Azure content_filter", label: str = ""):
+        self.label = (label or "").strip()
+        detail = f"{message}: {self.label}" if self.label else message
+        super().__init__(detail)
+
+
+def content_filter_label(error: BaseException | None = None, choice=None) -> str:
+    parts = []
+    if error is not None:
+        parts.append(str(error))
+        body = getattr(error, "body", None)
+        if body is not None:
+            parts.append(str(body))
+    if choice is not None:
+        parts.append(str(_attr(choice, "finish_reason") or ""))
+        parts.append(str(_attr(choice, "content_filter_results") or ""))
+    blob = " ".join(parts)
+    key = "label '"
+    if key in blob:
+        start = blob.find(key) + len(key)
+        end = blob.find("'", start)
+        if end > start:
+            return blob[start:end]
+    return ""
+
+
+def is_content_filter_error(error: BaseException) -> bool:
+    blob = f"{error} {getattr(error, 'body', '')}".lower()
+    return (
+        "content_filter" in blob
+        or "contentsafety" in blob
+        or "responsibleaipolicyviolation" in blob
+    )
+
+
+def is_content_filter_choice(choice) -> bool:
+    return str(_attr(choice, "finish_reason") or "").lower() == "content_filter"
+
+
 def deployment_missing_message(deployment: str, found: list[str] | None = None) -> str:
     names = found if found is not None else list_azure_deployments()
     listed = ", ".join(names) if names else "(none listed; open Azure Portal → Deployments)"
@@ -582,6 +624,11 @@ def azure_chat_create(client, kwargs: dict):
         except Exception as error:
             if is_deployment_missing(error):
                 raise SystemExit(deployment_missing_message(str(pending.get("model", "")))) from error
+            if is_content_filter_error(error):
+                raise AzureContentFilterError(
+                    "Azure content_filter",
+                    label=content_filter_label(error),
+                ) from error
             if "temperature" in pending and "temperature" not in stripped and is_unsupported_parameter(
                 error, "temperature"
             ):
@@ -663,6 +710,11 @@ def azure_answer_text(
         reasoning_effort=reasoning_effort,
     )
     choice, message, usage, visible = _azure_answer_once(client, kwargs)
+    if is_content_filter_choice(choice):
+        raise AzureContentFilterError(
+            "Azure content_filter",
+            label=content_filter_label(choice=choice),
+        )
     if visible:
         return strip_thinking(visible)
 
@@ -679,6 +731,11 @@ def azure_answer_text(
         else:
             retry_kwargs["max_completion_tokens"] = retry_tokens
         choice, message, usage, visible = _azure_answer_once(client, retry_kwargs)
+        if is_content_filter_choice(choice):
+            raise AzureContentFilterError(
+                "Azure content_filter",
+                label=content_filter_label(choice=choice),
+            )
         if visible:
             return strip_thinking(visible)
         why = describe_completion(choice, usage)
@@ -736,6 +793,8 @@ def answer_chat(
             temperature=temperature,
             model_name=name,
         )
+    except AzureContentFilterError:
+        raise
     except Exception as err:
         reraise_connection_error(err)
         raise

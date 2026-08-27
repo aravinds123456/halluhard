@@ -357,8 +357,17 @@ def main():
     label_counts = Counter()
     duplicate_count = 0
     for index, (question_number, question, domain, sample_index) in enumerate(pending, start=1):
-        answer, features, rng_seed = generate_seed_answer(question, question_number, sample_index)
         progress = f"[{index}/{len(pending)}] q{question_number}#{sample_index}"
+        try:
+            answer, features, rng_seed = generate_seed_answer(question, question_number, sample_index)
+        except Exception as err:
+            from runtime import AzureContentFilterError
+            if not isinstance(err, AzureContentFilterError):
+                raise
+            print(
+                f"{progress}: Azure content_filter ({err.label or 'blocked'}), skipping"
+            )
+            continue
         if not answer:
             print(
                 f"{progress}: empty generation, skipping "

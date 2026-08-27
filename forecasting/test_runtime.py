@@ -246,6 +246,41 @@ class AzureCreateLoopTests(unittest.TestCase):
         self.assertEqual(client.calls[1]["max_completion_tokens"], 32768)
 
 
+class ContentFilterTests(unittest.TestCase):
+    def test_detects_azure_400_payload(self):
+        from runtime import content_filter_label, is_content_filter_error
+        err = RuntimeError(
+            "Error code: 400 - {'choices': [{'finish_reason': 'content_filter', "
+            "'content_filter_results': {'error': {'code': 'content_filter', "
+            "\"message\": \"Response content blocked by label 'MultiSeverity_SexualScore'.\"}}}]}"
+        )
+        self.assertTrue(is_content_filter_error(err))
+        self.assertEqual(content_filter_label(err), "MultiSeverity_SexualScore")
+
+    def test_create_wraps_filter_error(self):
+        from runtime import AzureContentFilterError, azure_chat_create
+        err = RuntimeError("Error code: 400 - finish_reason': 'content_filter'")
+        client = ScriptedClient([err])
+        with self.assertRaises(AzureContentFilterError) as ctx:
+            azure_chat_create(client, {"model": "gpt-oss-120b", "messages": [], "max_tokens": 16})
+        self.assertIn("content_filter", str(ctx.exception).lower())
+
+    def test_empty_content_filter_does_not_retry(self):
+        from runtime import AzureContentFilterError, azure_answer_text
+        client = ScriptedClient([make_response(content="", finish_reason="content_filter")])
+        with self.assertRaises(AzureContentFilterError):
+            azure_answer_text(
+                client,
+                [{"role": "user", "content": "q"}],
+                300,
+                model_name="gpt-oss-20b",
+                send_temperature=False,
+                reasoning_effort="low",
+                use_reasoning_fallback=False,
+            )
+        self.assertEqual(len(client.calls), 1)
+
+
 class CredentialAndTlsTests(unittest.TestCase):
     def test_readme_endpoint_is_a_placeholder(self):
         from runtime import looks_like_placeholder

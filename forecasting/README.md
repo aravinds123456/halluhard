@@ -183,6 +183,8 @@ Azure GPT-OSS is a reasoning model. Hidden reasoning tokens count against the co
 
 This checkout sends `max_tokens=32768` by default (`reasoning_effort=low`). If Azure rejects `max_tokens`, it retries with `max_completion_tokens`. The skip line prints the cap. stderr also prints `finish_reason` and `reasoning_tokens` when content is empty.
 
+Azure `content_filter` (violence, sexual content, etc.) used to abort the whole tree. Those nodes are now recorded as `node_kind=skipped` and the run continues; `--resume` does not retry them. They are incomplete, not DROP.
+
 Pull, set `AZURE_OPENAI_DEPLOYMENT` to the portal name, then re-run **only** `--pilot` seeds. Do not start the tree until `forecasting/seeds_gpt-oss-20b.jsonl` has judged rows.
 
 ## HalluHard vs this folder
