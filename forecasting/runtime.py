@@ -29,6 +29,20 @@ model = None
 device = None
 _gemini_client = None
 _gemini_model = None
+_http_client = None
+
+# README / chat examples. Connecting to these hosts or keys fails TLS or auth.
+_PLACEHOLDER_NEEDLES = (
+    "your-resource",
+    "your_resource",
+    "new key after rotate",
+    "(new key",
+    "placeholder",
+    "sk-proj-xxx",
+    "paste-your",
+    "<your-",
+    "example.openai.azure.com",
+)
 
 
 def resolve_device():
@@ -190,6 +204,193 @@ def azure_credentials() -> tuple[str, str]:
     return endpoint.rstrip("/"), key
 
 
+def looks_like_placeholder(value: str) -> bool:
+    text = (value or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith("<") and ">" in text:
+        return True
+    return any(needle in text for needle in _PLACEHOLDER_NEEDLES)
+
+
+def certifi_ca_file() -> str:
+    existing = os.environ.get("SSL_CERT_FILE", "").strip()
+    if existing and os.path.isfile(existing):
+        return existing
+    try:
+        import certifi
+        return certifi.where()
+    except ImportError:
+        return existing
+
+
+def ssl_verify_context():
+    """Verify TLS with certifi (and macOS keychain via truststore when present).
+
+    Apple Command Line Tools Python 3.9 has an empty cert store. OpenAI SDK 2+
+    uses HTTPX2, which trusts the OS store and no longer ships certifi.
+    """
+    import ssl
+
+    cafile = certifi_ca_file() or None
+    try:
+        import truststore
+        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if cafile:
+            ctx.load_verify_locations(cafile=cafile)
+        return ctx
+    except Exception:
+        pass
+    if cafile:
+        return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
+def apply_certifi_env() -> str:
+    cafile = certifi_ca_file()
+    if cafile:
+        os.environ.setdefault("SSL_CERT_FILE", cafile)
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", cafile)
+    return cafile
+
+
+def make_openai_http_client():
+    """Shared HTTP client: Mozilla CA bundle + HTTP/1.1.
+
+    HTTPX2 + HTTP/2 ALPN is what produced SSLV3_ALERT_HANDSHAKE_FAILURE on
+    Homebrew Python 3.14. Legacy httpx + certifi is what finished the 43-seed
+    tree on the same Mac.
+    """
+    global _http_client
+    if _http_client is not None:
+        return _http_client
+    apply_certifi_env()
+    verify = ssl_verify_context()
+    try:
+        import httpx
+        kwargs = {"verify": verify, "timeout": 120.0, "follow_redirects": True}
+        try:
+            _http_client = httpx.Client(http2=False, **kwargs)
+        except TypeError:
+            _http_client = httpx.Client(**kwargs)
+        return _http_client
+    except ImportError:
+        pass
+    try:
+        import httpx2
+        kwargs = {"verify": verify, "timeout": 120.0, "follow_redirects": True}
+        try:
+            _http_client = httpx2.Client(http2=False, **kwargs)
+        except TypeError:
+            _http_client = httpx2.Client(**kwargs)
+        return _http_client
+    except ImportError:
+        pass
+    try:
+        from openai import DefaultHttpx2Client
+        _http_client = DefaultHttpx2Client(verify=verify)
+        return _http_client
+    except (ImportError, TypeError):
+        pass
+    try:
+        from openai import DefaultHttpxClient
+        _http_client = DefaultHttpxClient(verify=verify)
+        return _http_client
+    except (ImportError, TypeError) as err:
+        raise RuntimeError(
+            "Need httpx or openai to open a TLS client. "
+            "pip install certifi httpx openai"
+        ) from err
+
+
+def openai_client_kwargs(**extra):
+    kwargs = dict(extra)
+    kwargs["http_client"] = make_openai_http_client()
+    return kwargs
+
+
+def require_openai_key() -> str:
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        raise SystemExit("Set OPENAI_API_KEY to the real secret from platform.openai.com (starts with sk-).")
+    if looks_like_placeholder(key):
+        raise SystemExit(
+            "OPENAI_API_KEY is still the example string, not a real key.\n"
+            "In this terminal: export OPENAI_API_KEY=sk-...  (from platform.openai.com)\n"
+            "Do not paste keys into chat."
+        )
+    return key
+
+
+def require_azure_credentials() -> tuple[str, str]:
+    endpoint, key = azure_credentials()
+    if not endpoint or not key:
+        raise SystemExit(
+            "GPT-OSS on Azure needs AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY "
+            "(or AZURE_ENDPOINT / AZURE_API_KEY)."
+        )
+    if looks_like_placeholder(endpoint) or looks_like_placeholder(key):
+        raise SystemExit(
+            "AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY still look like the README example "
+            "(YOUR-RESOURCE or '(new key after rotate)').\n"
+            "Copy the real endpoint from Azure Portal → your OpenAI resource → Keys and Endpoint.\n"
+            "The tree log must show a hostname you own, not YOUR-RESOURCE.openai.azure.com."
+        )
+    return endpoint, key
+
+
+def require_live_api(model_name: str | None = None) -> None:
+    require_openai_key()
+    name = model_name or env_str("TEST_MODEL", DEFAULT_TEST_MODEL)
+    if uses_azure_answer(name):
+        require_azure_credentials()
+
+
+def connection_error_hint(err: BaseException) -> str:
+    text = str(err)
+    lowered = text.lower()
+    lines = [f"OpenAI/Azure connection failed: {text}"]
+    endpoint, _ = azure_credentials()
+    if looks_like_placeholder(endpoint):
+        lines.append("AZURE_OPENAI_ENDPOINT is still the README placeholder. Export the real Azure URL.")
+    if looks_like_placeholder(os.environ.get("OPENAI_API_KEY", "")):
+        lines.append("OPENAI_API_KEY is still the example string. Export the real sk- key.")
+    if "certificate_verify_failed" in lowered or "unable to get local issuer" in lowered:
+        lines.append(
+            "TLS certificate verify failed. Apple Command Line Tools Python 3.9 (.venv) cannot "
+            "verify api.openai.com. Use Homebrew Python: source venv/bin/activate && "
+            "pip install -U certifi httpx openai"
+        )
+    if "handshake_failure" in lowered or "sslv3_alert" in lowered:
+        lines.append(
+            "TLS handshake failed. Usual causes: placeholder Azure host, VPN/proxy, or "
+            "OpenAI SDK HTTPX2 on Python 3.14. This process injects certifi + HTTP/1.1. "
+            "If it still fails: brew install python@3.12 && "
+            "/opt/homebrew/bin/python3.12 -m venv venv312 && source venv312/bin/activate && "
+            "pip install -r scripts/cascade_repo_requirements.txt"
+        )
+    lines.append(
+        "Confirm python is Homebrew 3.12+ (`python -c \"import sys; print(sys.version)\"`), "
+        "not /Library/Developer/CommandLineTools Python 3.9."
+    )
+    return "\n".join(lines)
+
+
+def reraise_connection_error(err: BaseException):
+    name = type(err).__name__
+    text = str(err)
+    lowered = text.lower()
+    if (
+        "APIConnectionError" in name
+        or "ConnectError" in name
+        or "certificate_verify_failed" in lowered
+        or "handshake_failure" in lowered
+        or "sslv3_alert" in lowered
+    ):
+        raise SystemExit(connection_error_hint(err)) from err
+    raise err
+
+
 def uses_azure_answer(name: str) -> bool:
     backend = env_str("ANSWER_BACKEND", "").lower()
     if backend in {"azure", "azure-openai", "api"}:
@@ -220,7 +421,7 @@ def list_azure_deployments() -> list[str]:
     url = f"{endpoint}/openai/deployments?api-version={version}"
     request = urllib.request.Request(url, headers={"api-key": key})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=20, context=ssl_verify_context()) as response:
             payload = json.loads(response.read().decode())
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return []
@@ -240,6 +441,48 @@ def is_deployment_missing(error: BaseException) -> bool:
         inner = body.get("error") if isinstance(body.get("error"), dict) else body
         code = str(inner.get("code") or "")
     return "DeploymentNotFound" in text or code == "DeploymentNotFound"
+
+
+class AzureContentFilterError(RuntimeError):
+    """Azure blocked the completion. Skip this node; do not abort the tree."""
+
+    def __init__(self, message: str = "Azure content_filter", label: str = ""):
+        self.label = (label or "").strip()
+        detail = f"{message}: {self.label}" if self.label else message
+        super().__init__(detail)
+
+
+def content_filter_label(error: BaseException | None = None, choice=None) -> str:
+    parts = []
+    if error is not None:
+        parts.append(str(error))
+        body = getattr(error, "body", None)
+        if body is not None:
+            parts.append(str(body))
+    if choice is not None:
+        parts.append(str(_attr(choice, "finish_reason") or ""))
+        parts.append(str(_attr(choice, "content_filter_results") or ""))
+    blob = " ".join(parts)
+    key = "label '"
+    if key in blob:
+        start = blob.find(key) + len(key)
+        end = blob.find("'", start)
+        if end > start:
+            return blob[start:end]
+    return ""
+
+
+def is_content_filter_error(error: BaseException) -> bool:
+    blob = f"{error} {getattr(error, 'body', '')}".lower()
+    return (
+        "content_filter" in blob
+        or "contentsafety" in blob
+        or "responsibleaipolicyviolation" in blob
+    )
+
+
+def is_content_filter_choice(choice) -> bool:
+    return str(_attr(choice, "finish_reason") or "").lower() == "content_filter"
 
 
 def deployment_missing_message(deployment: str, found: list[str] | None = None) -> str:
@@ -381,6 +624,11 @@ def azure_chat_create(client, kwargs: dict):
         except Exception as error:
             if is_deployment_missing(error):
                 raise SystemExit(deployment_missing_message(str(pending.get("model", "")))) from error
+            if is_content_filter_error(error):
+                raise AzureContentFilterError(
+                    "Azure content_filter",
+                    label=content_filter_label(error),
+                ) from error
             if "temperature" in pending and "temperature" not in stripped and is_unsupported_parameter(
                 error, "temperature"
             ):
@@ -462,6 +710,11 @@ def azure_answer_text(
         reasoning_effort=reasoning_effort,
     )
     choice, message, usage, visible = _azure_answer_once(client, kwargs)
+    if is_content_filter_choice(choice):
+        raise AzureContentFilterError(
+            "Azure content_filter",
+            label=content_filter_label(choice=choice),
+        )
     if visible:
         return strip_thinking(visible)
 
@@ -478,6 +731,11 @@ def azure_answer_text(
         else:
             retry_kwargs["max_completion_tokens"] = retry_tokens
         choice, message, usage, visible = _azure_answer_once(client, retry_kwargs)
+        if is_content_filter_choice(choice):
+            raise AzureContentFilterError(
+                "Azure content_filter",
+                label=content_filter_label(choice=choice),
+            )
         if visible:
             return strip_thinking(visible)
         why = describe_completion(choice, usage)
@@ -501,19 +759,16 @@ def azure_answer_text(
 def make_azure_client():
     from openai import AzureOpenAI, OpenAI
 
-    endpoint, key = azure_credentials()
-    if not endpoint or not key:
-        raise SystemExit(
-            "GPT-OSS on Azure needs AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY "
-            "(or AZURE_ENDPOINT / AZURE_API_KEY)."
-        )
+    endpoint, key = require_azure_credentials()
+    http_client = make_openai_http_client()
     if "/openai/v1" in endpoint or endpoint.endswith("/models"):
         base = endpoint if endpoint.endswith("/") else f"{endpoint}/"
-        return OpenAI(base_url=base, api_key=key)
+        return OpenAI(base_url=base, api_key=key, http_client=http_client)
     return AzureOpenAI(
         azure_endpoint=endpoint,
         api_key=key,
         api_version=env_str("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+        http_client=http_client,
     )
 
 
@@ -530,13 +785,19 @@ def answer_chat(
         init_model(name)
         return generate_response(messages, max_new_tokens=tokens)
 
-    return azure_answer_text(
-        make_azure_client(),
-        messages,
-        tokens,
-        temperature=temperature,
-        model_name=name,
-    )
+    try:
+        return azure_answer_text(
+            make_azure_client(),
+            messages,
+            tokens,
+            temperature=temperature,
+            model_name=name,
+        )
+    except AzureContentFilterError:
+        raise
+    except Exception as err:
+        reraise_connection_error(err)
+        raise
 
 
 def load_answer_model(name: str):
@@ -589,9 +850,12 @@ def _openai_text(client, prompt: str, as_json: bool) -> str:
 def gpt(prompt: str, as_json: bool = True):
     from openai import OpenAI
 
-    if not os.environ.get("OPENAI_API_KEY", "").strip():
-        raise SystemExit("Set OPENAI_API_KEY")
-    reply = _openai_text(OpenAI(), prompt, as_json=as_json)
+    require_openai_key()
+    try:
+        reply = _openai_text(OpenAI(**openai_client_kwargs()), prompt, as_json=as_json)
+    except Exception as err:
+        reraise_connection_error(err)
+        raise
     if as_json:
         import json
         return json.loads(reply or "{}")

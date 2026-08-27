@@ -246,5 +246,105 @@ class AzureCreateLoopTests(unittest.TestCase):
         self.assertEqual(client.calls[1]["max_completion_tokens"], 32768)
 
 
+class ContentFilterTests(unittest.TestCase):
+    def test_detects_azure_400_payload(self):
+        from runtime import content_filter_label, is_content_filter_error
+        err = RuntimeError(
+            "Error code: 400 - {'choices': [{'finish_reason': 'content_filter', "
+            "'content_filter_results': {'error': {'code': 'content_filter', "
+            "\"message\": \"Response content blocked by label 'MultiSeverity_SexualScore'.\"}}}]}"
+        )
+        self.assertTrue(is_content_filter_error(err))
+        self.assertEqual(content_filter_label(err), "MultiSeverity_SexualScore")
+
+    def test_create_wraps_filter_error(self):
+        from runtime import AzureContentFilterError, azure_chat_create
+        err = RuntimeError("Error code: 400 - finish_reason': 'content_filter'")
+        client = ScriptedClient([err])
+        with self.assertRaises(AzureContentFilterError) as ctx:
+            azure_chat_create(client, {"model": "gpt-oss-120b", "messages": [], "max_tokens": 16})
+        self.assertIn("content_filter", str(ctx.exception).lower())
+
+    def test_empty_content_filter_does_not_retry(self):
+        from runtime import AzureContentFilterError, azure_answer_text
+        client = ScriptedClient([make_response(content="", finish_reason="content_filter")])
+        with self.assertRaises(AzureContentFilterError):
+            azure_answer_text(
+                client,
+                [{"role": "user", "content": "q"}],
+                300,
+                model_name="gpt-oss-20b",
+                send_temperature=False,
+                reasoning_effort="low",
+                use_reasoning_fallback=False,
+            )
+        self.assertEqual(len(client.calls), 1)
+
+
+class CredentialAndTlsTests(unittest.TestCase):
+    def test_readme_endpoint_is_a_placeholder(self):
+        from runtime import looks_like_placeholder
+        self.assertTrue(looks_like_placeholder("https://YOUR-RESOURCE.openai.azure.com/"))
+        self.assertTrue(looks_like_placeholder("(new key after rotate)"))
+        self.assertTrue(looks_like_placeholder("<your-key>"))
+        self.assertFalse(looks_like_placeholder("https://myres.openai.azure.com"))
+        self.assertFalse(looks_like_placeholder("sk-proj-abc123"))
+
+    def test_require_azure_rejects_placeholder_host(self):
+        import os
+        from unittest import mock
+        from runtime import require_azure_credentials
+        env = {
+            "AZURE_OPENAI_ENDPOINT": "https://YOUR-RESOURCE.openai.azure.com/",
+            "AZURE_OPENAI_API_KEY": "not-a-placeholder-key",
+            "AZURE_ENDPOINT": "",
+            "AZURE_API_KEY": "",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            with self.assertRaises(SystemExit) as ctx:
+                require_azure_credentials()
+        self.assertIn("YOUR-RESOURCE", str(ctx.exception))
+
+    def test_require_openai_rejects_example_key(self):
+        import os
+        from unittest import mock
+        from runtime import require_openai_key
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "(new key after rotate)"}, clear=False):
+            with self.assertRaises(SystemExit) as ctx:
+                require_openai_key()
+        self.assertIn("example string", str(ctx.exception))
+
+    def test_handshake_hint_mentions_http1_and_python312(self):
+        from runtime import connection_error_hint
+        text = connection_error_hint(RuntimeError("[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] handshake failure"))
+        self.assertIn("HTTP/1.1", text)
+        self.assertIn("python@3.12", text)
+
+    def test_reraise_wraps_connect_error(self):
+        from runtime import reraise_connection_error
+        with self.assertRaises(SystemExit) as ctx:
+            reraise_connection_error(RuntimeError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate"))
+        self.assertIn("Command Line Tools", str(ctx.exception))
+
+    def test_http_client_uses_explicit_verify(self):
+        import runtime
+        runtime._http_client = None
+        try:
+            client = runtime.make_openai_http_client()
+        except RuntimeError as err:
+            if "Need httpx or openai" in str(err):
+                self.skipTest("httpx/openai not installed in this environment")
+            raise
+        try:
+            self.assertIsNotNone(client)
+        finally:
+            if runtime._http_client is not None:
+                try:
+                    runtime._http_client.close()
+                except Exception:
+                    pass
+                runtime._http_client = None
+
+
 if __name__ == "__main__":
     unittest.main()

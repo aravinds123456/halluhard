@@ -305,6 +305,7 @@ def main():
         azure_reasoning_effort,
         azure_send_temperature,
         judge_backend,
+        require_live_api,
         setup_gemini,
         uses_azure_answer,
     )
@@ -342,6 +343,7 @@ def main():
     if dry_run:
         print("DRY_RUN=1 set; validation passed, exiting before model/API calls.")
         return
+    require_live_api(MODEL_NAME)
     if rejudge:
         rejudge_existing(question_items, pilot)
         return
@@ -355,8 +357,17 @@ def main():
     label_counts = Counter()
     duplicate_count = 0
     for index, (question_number, question, domain, sample_index) in enumerate(pending, start=1):
-        answer, features, rng_seed = generate_seed_answer(question, question_number, sample_index)
         progress = f"[{index}/{len(pending)}] q{question_number}#{sample_index}"
+        try:
+            answer, features, rng_seed = generate_seed_answer(question, question_number, sample_index)
+        except Exception as err:
+            from runtime import AzureContentFilterError
+            if not isinstance(err, AzureContentFilterError):
+                raise
+            print(
+                f"{progress}: Azure content_filter ({err.label or 'blocked'}), skipping"
+            )
+            continue
         if not answer:
             print(
                 f"{progress}: empty generation, skipping "

@@ -53,6 +53,7 @@ from cascade import (
     hallucinating,
     hint_for,
     judged_seed,
+    is_skipped_node,
     seed_class,
     history,
     names,
@@ -256,6 +257,79 @@ def _messages_from_record(question: str, first: str, record: dict) -> list[dict]
     return messages
 
 
+def _write_skipped_branch(
+    *,
+    out,
+    seen: bool,
+    bid: str,
+    seed: dict,
+    path,
+    depth: int,
+    levels: int,
+    model: str,
+    judge_name: str,
+    question: str,
+    first: str,
+    text: str,
+    is_hall: bool,
+    entities,
+    features: dict,
+    ask: str,
+    why: str,
+    parent_record: dict,
+    err,
+) -> bool:
+    """Record an Azure content_filter skip so --resume does not retry it. Returns new seen."""
+    label = getattr(err, "label", "") or ""
+    record = dict(parent_record)
+    record.update({
+        f"follow_up_{depth}": ask,
+        f"future_turn_{depth}": "",
+        f"turn_state_{depth}": "SKIPPED",
+        f"turn_label_{depth}": "SKIPPED",
+        f"turn_reason_{depth}": f"azure content_filter {label}".strip(),
+        f"judge_parse_status_{depth}": "skipped",
+        f"rejected_{depth}": why,
+        "judge_parse_status": "skipped",
+    })
+    node = {
+        "schema_version": SCHEMA_VERSION,
+        "branch_id": bid,
+        "question_number": seed["question_number"],
+        "seed_id": seed_identifier(seed),
+        "sample_index": seed.get("sample_index"),
+        "domain": domain_of(seed),
+        "answer_model": model,
+        "judge_model_name": judge_name,
+        "enable_thinking": ENABLE_THINKING,
+        "follow_up_mode": path_key(path),
+        "follow_up_path": list(path),
+        "first_follow_up": path[0],
+        "tree_depth": depth,
+        "node_kind": "skipped",
+        "question": question,
+        "original_answer": first,
+        "false_claim": text,
+        "claim": text,
+        "seed_hallucinating": is_hall,
+        "seed_class": seed_class(seed),
+        "domain_group": domain_group(seed),
+        "entities": entities,
+        "levels": levels,
+        "branch_outcome": "SKIPPED",
+        "final_label": "SKIPPED",
+        "azure_skip_reason": "content_filter",
+        "azure_skip_label": label,
+        "prompt_pack_version": prompt_pack_version(),
+        "prompt_ids": prompt_ids(),
+        **features,
+        **record,
+    }
+    write(out, node, seen)
+    print(f"  {path_key(path):<40} SKIP content_filter" + (f" ({label})" if label else ""))
+    return True
+
+
 def cmd_tree(args) -> None:
     """Step C: full 3-ary D/N/V tree. Level 1 = 3 prompts, level 2 = 9 more (3^2+3)."""
     if getattr(args, "pilot", False):
@@ -279,7 +353,9 @@ def cmd_tree(args) -> None:
     existing = {r["branch_id"]: r for r in rows(out)} if args.resume else {}
     done = set(existing)
     seen = bool(done)
-    from runtime import active_judge_model
+    from runtime import active_judge_model, require_live_api
+    if not args.dry_run:
+        require_live_api(args.model)
     judge_name = active_judge_model()
     per_seed = prompt_count(len(cats), args.levels)
     print(
@@ -349,6 +425,12 @@ def cmd_tree(args) -> None:
                     bid = branch_id(args.model, seed, path)
                     if bid in existing:
                         saved = existing[bid]
+                        if is_skipped_node(saved):
+                            print(
+                                f"  {path_key(path):<40} SKIP "
+                                f"{saved.get('azure_skip_reason', 'content_filter')} (cached)"
+                            )
+                            continue
                         turns = [
                             {
                                 "turn": level,
@@ -378,7 +460,35 @@ def cmd_tree(args) -> None:
                         question, text, parent["messages"], parent["label"], cat, entities, args.dry_run,
                     )
                     messages = parent["messages"] + [{"role": "user", "content": ask}]
-                    reply = strip_thinking(chat(messages))
+                    try:
+                        reply = strip_thinking(chat(messages))
+                    except Exception as err:
+                        from runtime import AzureContentFilterError
+                        if not isinstance(err, AzureContentFilterError):
+                            raise
+                        seen = _write_skipped_branch(
+                            out=out,
+                            seen=seen,
+                            bid=bid,
+                            seed=seed,
+                            path=path,
+                            depth=depth,
+                            levels=args.levels,
+                            model=args.model,
+                            judge_name=judge_name,
+                            question=question,
+                            first=first,
+                            text=text,
+                            is_hall=is_hall,
+                            entities=entities,
+                            features=features,
+                            ask=ask,
+                            why=why,
+                            parent_record=parent["record"],
+                            err=err,
+                        )
+                        done.add(bid)
+                        continue
                     messages = messages + [{"role": "assistant", "content": reply}]
                     label, reason, parse_status = _judge_turn(question, text, first, messages, reply, args.dry_run)
                     state = display_state(label)

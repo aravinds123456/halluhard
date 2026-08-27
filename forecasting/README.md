@@ -67,9 +67,16 @@ Needs Azure credentials for GPT-OSS and `OPENAI_API_KEY` for the judge.
 
 Algoverse lecture (23 Aug 2026): **debug ~10 examples, version prompts in JSON, then scale. Report every outcome. Do not overclaim.**
 
+Use Homebrew Python (`venv/`), not Apple Command Line Tools Python 3.9 (`.venv`). Copy the real endpoint and keys from Azure Portal and platform.openai.com. Leaving `YOUR-RESOURCE` or `(new key after rotate)` in the environment fails TLS before any model call.
+
 ```bash
+source venv/bin/activate
+pip install -U certifi httpx openai
+
+# Real hostname from Azure Portal → Keys and Endpoint. Do not leave YOUR-RESOURCE.
 export AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
 export AZURE_OPENAI_API_KEY=...
+export AZURE_OPENAI_DEPLOYMENT=gpt-oss-120b
 export OPENAI_API_KEY=...
 
 # 1) Debug seed-judge prompts on ~10 questions (required before a large seed run)
@@ -103,7 +110,10 @@ python forecasting/generate_seeds.py --pilot --rejudge
 Do not delete the seed file for a judge change. Deleting it would redraw answers and confound the judge with the model. v4 is stricter about invented particulars and about not scoring the question excerpt. It does not aim for a target hallucination rate; 3/10 can be a real rate if the model mostly restated the excerpt.
 
 If your Azure endpoint is Models-as-a-Service, set
-`AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/`.
+`AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/`
+(replace `YOUR-RESOURCE`).
+
+`CERTIFICATE_VERIFY_FAILED` on macOS is Apple CLT Python 3.9. `SSLV3_ALERT_HANDSHAKE_FAILURE` is usually a placeholder Azure host, a VPN, or OpenAI SDK HTTPX2 on Python 3.14. The runtime injects certifi + HTTP/1.1. If 3.14 still handshake-fails, use `python@3.12`.
 
 ```bash
 python maincode.py
@@ -172,6 +182,8 @@ Do not point `--seeds` at a Qwen file if the tree is GPT-OSS. Do not mix the old
 Azure GPT-OSS is a reasoning model. Hidden reasoning tokens count against the completion cap. If that cap is too small (the old default was 300), Azure returns `finish_reason=length` with empty `message.content`, and seed generation prints `empty generation, skipping`.
 
 This checkout sends `max_tokens=32768` by default (`reasoning_effort=low`). If Azure rejects `max_tokens`, it retries with `max_completion_tokens`. The skip line prints the cap. stderr also prints `finish_reason` and `reasoning_tokens` when content is empty.
+
+Azure `content_filter` (violence, sexual content, etc.) used to abort the whole tree. Those nodes are now recorded as `node_kind=skipped` and the run continues; `--resume` does not retry them. They are incomplete, not DROP.
 
 Pull, set `AZURE_OPENAI_DEPLOYMENT` to the portal name, then re-run **only** `--pilot` seeds. Do not start the tree until `forecasting/seeds_gpt-oss-20b.jsonl` has judged rows.
 

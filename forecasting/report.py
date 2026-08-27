@@ -35,6 +35,7 @@ from cascade import (
     domain_of,
     leaf_paths,
     mcnemar,
+    is_skipped_node,
     normalize_outcome,
     path_key,
     prompt_count,
@@ -119,14 +120,26 @@ def records_from_partial(data: dict) -> list[dict]:
 
 
 def parsable_records(records: list[dict]) -> list[dict]:
-    """Drop judge failures so unparseable output cannot inflate DROP or DEPEND."""
-    return [rec for rec in records if rec.get("judge_parse_status", "ok") != "failed"]
+    """Drop judge failures and Azure skips so they cannot inflate DROP or DEPEND."""
+    from cascade import is_skipped_node
+    return [
+        rec for rec in records
+        if rec.get("judge_parse_status", "ok") != "failed" and not is_skipped_node(rec)
+    ]
 
 
 def records_from_live(tree_path: Path, labels_path: Path) -> list[dict]:
     labels = {r["branch_id"]: r for r in rows(labels_path)}
     out = []
     for row in rows(tree_path):
+        if is_skipped_node(row):
+            rec = dict(row)
+            rec["final_label"] = "SKIPPED"
+            rec["domain"] = rec.get("domain") or domain_of(rec)
+            rec["seed_class"] = rec.get("seed_class") or seed_class(rec)
+            rec["domain_group"] = rec.get("domain_group") or domain_group(rec)
+            out.append(rec)
+            continue
         label_row = labels.get(row.get("branch_id"), {})
         outcome = normalize_outcome(
             label_row.get("final_label") or row.get("branch_outcome") or row.get("final_label") or "DROP"
@@ -396,6 +409,8 @@ def completeness(records: list[dict], planned_seeds: int = DEFAULT_MAX_SEEDS) ->
     seeds = {r["question_number"] for r in records}
     by_seed = defaultdict(set)
     for rec in records:
+        if is_skipped_node(rec):
+            continue
         by_seed[rec["question_number"]].add(rec["follow_up_mode"])
     if any(rec.get("follow_up_path") or rec.get("tree_depth") for rec in records):
         levels = detected_turns(records) or DEFAULT_TURNS
@@ -789,9 +804,12 @@ def render_report(from_partial: bool, tree_path: Path, labels_path: Path, html_p
         print(f"Source: {tree_path.name} + {labels_path.name}")
 
     failed = [rec for rec in records if rec.get("judge_parse_status") == "failed"]
+    skipped = [rec for rec in records if is_skipped_node(rec)]
     scored = parsable_records(records)
     if failed:
         print(f"Excluding {len(failed)} parse failures from outcome tables (judge_parse_status=failed).")
+    if skipped:
+        print(f"Excluding {len(skipped)} Azure content_filter skips from outcome tables.")
 
     first = [rec for rec in scored if rec.get("tree_depth") == 1]
     leaves = [rec for rec in scored if rec.get("node_kind") == "leaf" or rec.get("tree_depth") == 2]

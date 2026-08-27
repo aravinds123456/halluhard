@@ -315,6 +315,39 @@ class PartialRunTests(unittest.TestCase):
         self.assertEqual(complete["incomplete_seeds"], [(89, ["accepting", "skeptical", "topic-shift"])])
         self.assertEqual(complete["seed_domains"], {"legal": 27, "research": 18, "medical": 16})
 
+    def test_content_filter_skip_is_incomplete_not_drop(self):
+        from report import parsable_records
+        records = [
+            {
+                "question_number": 100072,
+                "follow_up_mode": "dependency-seeking",
+                "follow_up_path": ["dependency-seeking"],
+                "tree_depth": 1,
+                "node_kind": "internal",
+                "judge_parse_status": "ok",
+                "final_label": "DEPEND",
+                "levels": 2,
+            },
+            {
+                "question_number": 100072,
+                "follow_up_mode": "dependency-seeking/neutral",
+                "follow_up_path": ["dependency-seeking", "neutral"],
+                "tree_depth": 2,
+                "node_kind": "skipped",
+                "azure_skip_reason": "content_filter",
+                "azure_skip_label": "MultiSeverity_SexualScore",
+                "final_label": "SKIPPED",
+                "levels": 2,
+            },
+        ]
+        scored = parsable_records(records)
+        self.assertEqual(len(scored), 1)
+        self.assertEqual(scored[0]["final_label"], "DEPEND")
+        complete = completeness(records, planned_seeds=1)
+        missing = dict(complete["incomplete_seeds"])[100072]
+        self.assertIn("dependency-seeking/neutral", missing)
+        self.assertNotIn("SKIPPED", {row.get("final_label") for row in scored})
+
     def test_report_writes_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = Path(tmp) / "report.html"
