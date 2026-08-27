@@ -11,6 +11,10 @@ stay Not Hallucinating.
 
 Pass --no-web or CASCADE_WEB=0 for the LLM-only fallback (not the paper
 path). Pass CASCADE_WEB_FETCH=0 to keep Serper snippets without page fetch.
+
+HTML pages are fetched with httpx (the same client Serper already uses).
+aiohttp is only required for HalluHard's PDF downloader. A missing aiohttp
+must not abort HTML fetch or wipe Serper snippets.
 """
 
 from __future__ import annotations
@@ -18,8 +22,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
+from html.parser import HTMLParser
 from typing import Any, Callable
+from urllib.parse import urljoin, urlparse
 
 from cascade import DEFAULT_JUDGE_REASONING_EFFORT, env_str
 from prompts_pack import fill_prompt
@@ -37,6 +44,16 @@ MAX_PDFS_TO_FETCH = 1
 MAX_FILTER_WORDS = 1500
 MAX_EVIDENCE_CHARS = 8000
 MIN_PAGE_CHARS = 100
+_PDF_HREF = re.compile(r"""href\s*=\s*["']([^"']+\.pdf[^"']*)["']""", re.I)
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 GptFn = Callable[..., Any]
 SearchFn = Callable[[str], tuple[str, str, str | None]]
@@ -63,6 +80,60 @@ def web_flag_disabled() -> bool:
 
 def fetch_flag_disabled() -> bool:
     return env_str("CASCADE_WEB_FETCH", "1").lower() in {"0", "false", "no", "off"}
+
+
+def _module_available(name: str) -> bool:
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
+def fetch_backend_status() -> dict:
+    """What this interpreter can actually fetch. HTML uses httpx; aiohttp is PDF-only."""
+    httpx_ok = _module_available("httpx")
+    return {
+        "httpx": httpx_ok,
+        "aiohttp": _module_available("aiohttp"),
+        "trafilatura": _module_available("trafilatura"),
+        "html_fetch": httpx_ok,
+    }
+
+
+def describe_fetch_backend() -> str:
+    if fetch_flag_disabled():
+        return "page fetch disabled (CASCADE_WEB_FETCH=0); judging Serper snippets only"
+    status = fetch_backend_status()
+    if not status["html_fetch"]:
+        return (
+            "WARNING: page fetch unavailable (httpx missing). "
+            "Judging Serper snippets only. pip install httpx aiohttp trafilatura"
+        )
+    pdf = (
+        "PDF fetch on"
+        if status["aiohttp"]
+        else "PDF fetch off (aiohttp missing; HTML still fetched via httpx)"
+    )
+    cleaner = "trafilatura" if status["trafilatura"] else "stdlib HTML strip"
+    return f"HTML fetch via httpx ({cleaner}); {pdf}"
+
+
+def evidence_summary(verifications: list[dict]) -> str:
+    claims = []
+    for item in verifications:
+        claims.extend((item or {}).get("claims") or [])
+    if not claims:
+        return "Webscraper: no claims extracted"
+    n_pages = sum(1 for row in claims if row.get("evidence_kind") == "pages")
+    n_fetch_err = sum(1 for row in claims if row.get("fetch_error"))
+    errors = sorted({str(row.get("fetch_error")) for row in claims if row.get("fetch_error")})
+    line = f"Webscraper: {n_pages}/{len(claims)} claims used fetched pages"
+    if n_fetch_err:
+        line += f"; {n_fetch_err} fetch errors"
+        if errors:
+            line += f" ({errors[0][:160]})"
+    return line
 
 
 def serper_configured() -> bool:
@@ -170,48 +241,160 @@ def serper_search(claim: str, num_results: int = 5) -> tuple[str, str, str | Non
     return payload["snippets"], payload["query"], payload["error"]
 
 
-async def _fetch_one_url(url: str, title: str = "", snippet: str = "") -> dict | None:
-    """Fetch one HTML page or PDF the same way HalluHard webscraper does."""
-    from libs.browser_fetcher import BrowserFetcher, extract_pdf_links
-    from libs.html_cleaner import HtmlCleaner
-    from libs.information_extraction import check_if_url_is_pdf, extract_pdf_as_markdown
+def _is_pdf_url(url: str) -> bool:
+    """Same URL-shape check HalluHard uses; does not import aiohttp."""
+    if not (url or "").strip():
+        return False
+    url_lower = url.lower()
+    path = urlparse(url_lower).path
+    return (
+        path.endswith(".pdf")
+        or "/pdf/" in path
+        or ".pdf?" in path
+        or path.endswith(".pdf/")
+        or "arxiv.org/pdf/" in url_lower
+    )
 
+
+class _HTMLTextExtractor(HTMLParser):
+    _SKIP = {"script", "style", "noscript", "svg", "head"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip += 1
+        elif tag in {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "section"}:
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip:
+            self._skip -= 1
+        elif tag in {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "section"}:
+            self._chunks.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._chunks.append(data)
+
+
+def _html_to_text(html: str, source_url: str = "") -> str:
     try:
-        if await check_if_url_is_pdf(url):
-            markdown = await extract_pdf_as_markdown(url)
-            if not markdown or len(markdown.strip()) < MIN_PAGE_CHARS:
-                return None
-            return {
-                "title": title or "PDF",
-                "url": url,
-                "snippet": snippet,
-                "content": markdown,
-                "kind": "pdf",
-            }
+        import trafilatura
 
-        fetcher = BrowserFetcher()
-        html, error = await fetcher.fetch_html(url, force_selenium=False)
-        if error or not html:
-            return None
-        pdf_links = extract_pdf_links(html, base_url=url)
-        cleaned = HtmlCleaner().clean(html, source_url=url)
-        if not cleaned or len(cleaned.strip()) < MIN_PAGE_CHARS:
+        cleaned = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=True,
+            include_images=False,
+            include_links=True,
+            output_format="markdown",
+            url=source_url or None,
+            favor_recall=True,
+        )
+        if cleaned and len(cleaned.strip()) >= MIN_PAGE_CHARS:
+            return cleaned.strip()
+    except Exception:
+        pass
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:
+        return re.sub(r"<[^>]+>", " ", html or "")
+    text = "\n".join(
+        line.strip() for line in "".join(parser._chunks).splitlines() if line.strip()
+    )
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _pdf_links(html: str, base_url: str) -> list[str]:
+    links = []
+    seen = set()
+    for match in _PDF_HREF.finditer(html or ""):
+        url = urljoin(base_url, match.group(1).strip())
+        if url and url not in seen:
+            seen.add(url)
+            links.append(url)
+    return links
+
+
+async def _get_html(url: str) -> tuple[str, str | None]:
+    """Fetch raw HTML with httpx. HalluHard BrowserFetcher is the same httpx path."""
+    try:
+        import httpx
+    except ImportError as error:
+        return "", f"{type(error).__name__}: {error}"
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(20.0, connect=10.0),
+            headers=_FETCH_HEADERS,
+            verify=True,
+            http1=True,
+            http2=False,
+        ) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            content_type = (response.headers.get("content-type") or "").lower()
+            if "application/pdf" in content_type:
+                return "", "content-type is PDF"
+            text = response.text or ""
+            if len(text.strip()) < MIN_PAGE_CHARS:
+                return "", f"httpx returned little content ({len(text)} chars)"
+            return text, None
+    except Exception as error:
+        code = getattr(getattr(error, "response", None), "status_code", None)
+        if code is not None:
+            return "", f"httpx HTTP {code}"
+        return "", f"{type(error).__name__}: {error}"
+
+
+async def _fetch_pdf(url: str, title: str = "", snippet: str = "") -> dict | None:
+    """Best-effort PDF. HalluHard uses aiohttp here; missing aiohttp skips PDFs, not HTML."""
+    try:
+        from libs.information_extraction import extract_pdf_as_markdown
+
+        markdown = await extract_pdf_as_markdown(url)
+        if not markdown or len(markdown.strip()) < MIN_PAGE_CHARS:
             return None
         return {
-            "title": title,
+            "title": title or "PDF",
             "url": url,
             "snippet": snippet,
-            "content": cleaned,
-            "kind": "html",
-            "pdf_links": pdf_links or [],
+            "content": markdown,
+            "kind": "pdf",
         }
     except Exception:
         return None
 
 
-async def _filter_pages(claim: str, pages: list[dict]) -> str:
+async def _fetch_one_url(url: str, title: str = "", snippet: str = "") -> dict | None:
+    """Fetch one HTML page (httpx) or PDF (HalluHard/aiohttp if installed)."""
+    if _is_pdf_url(url):
+        return await _fetch_pdf(url, title=title, snippet=snippet)
+    html, error = await _get_html(url)
+    if error or not html:
+        return None
+    cleaned = _html_to_text(html, source_url=url)
+    if not cleaned or len(cleaned.strip()) < MIN_PAGE_CHARS:
+        return None
+    return {
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+        "content": cleaned,
+        "kind": "html",
+        "pdf_links": _pdf_links(html, url),
+    }
+
+
+async def _filter_pages(claim: str, pages: list[dict]) -> tuple[str, bool]:
     if not pages:
-        return ""
+        return "", False
     try:
         from libs.information_extraction import extract_relevant_sentences
 
@@ -224,7 +407,7 @@ async def _filter_pages(claim: str, pages: list[dict]) -> str:
             overlap=200,
         )
         if (filtered or "").strip():
-            return filtered.strip()
+            return filtered.strip(), True
     except Exception:
         pass
     joined = "\n\n".join(
@@ -232,7 +415,7 @@ async def _filter_pages(claim: str, pages: list[dict]) -> str:
         for page in pages
         if page.get("content")
     )
-    return _truncate_words(joined)
+    return _truncate_words(joined), False
 
 
 async def _fetch_and_filter_async(
@@ -240,9 +423,7 @@ async def _fetch_and_filter_async(
     snippets: str,
     urls: list[str],
     hits: list[dict] | None = None,
-) -> tuple[str, list[dict], str | None]:
-    from libs.information_extraction import is_pdf_url
-
+) -> tuple[str, list[dict], str | None, bool]:
     info = {hit["url"]: hit for hit in (hits or []) if hit.get("url")}
     ordered = []
     seen = set()
@@ -250,8 +431,8 @@ async def _fetch_and_filter_async(
         if url and url not in seen:
             ordered.append(url)
             seen.add(url)
-    html_urls = [url for url in ordered if not is_pdf_url(url)][:MAX_URLS_TO_FETCH]
-    pdf_urls = [url for url in ordered if is_pdf_url(url)][:MAX_PDFS_TO_FETCH]
+    html_urls = [url for url in ordered if not _is_pdf_url(url)][:MAX_URLS_TO_FETCH]
+    pdf_urls = [url for url in ordered if _is_pdf_url(url)][:MAX_PDFS_TO_FETCH]
 
     pages: list[dict] = []
     extra_pdfs: list[str] = []
@@ -273,9 +454,9 @@ async def _fetch_and_filter_async(
             pages.append(page)
 
     if not pages:
-        return "", [], "page fetch failed or returned nothing"
+        return "", [], "page fetch failed or returned nothing", False
 
-    filtered = await _filter_pages(claim, pages)
+    text, used_filter = await _filter_pages(claim, pages)
     records = [
         {
             "title": page.get("title") or "",
@@ -284,7 +465,7 @@ async def _fetch_and_filter_async(
         }
         for page in pages
     ]
-    return filtered, records, None
+    return text, records, None, used_filter
 
 
 def fetch_and_filter(
@@ -294,7 +475,10 @@ def fetch_and_filter(
     hits: list[dict] | None = None,
 ) -> tuple[str, list[dict], str | None]:
     try:
-        return _run_async(_fetch_and_filter_async(claim, snippets, urls, hits=hits))
+        text, pages, error, _filtered = _run_async(
+            _fetch_and_filter_async(claim, snippets, urls, hits=hits)
+        )
+        return text, pages, error
     except Exception as error:
         return "", [], f"{type(error).__name__}: {error}"
 
@@ -305,10 +489,8 @@ def _as_dict(payload: Any) -> dict:
     text = str(payload or "").strip()
     if not text:
         return {}
-    if "```" in text:
-        import re
-
-        match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+        if "```" in text:
+            match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
         if match:
             text = match.group(1).strip()
     try:
@@ -398,20 +580,30 @@ async def _live_evidence_async(claim: str) -> dict:
     pages_text = ""
     pages: list[dict] = []
     evidence_kind = "snippets"
+    fetch_error = None
+    filtered = False
     if not fetch_flag_disabled() and urls and not error:
-        pages_text, pages, fetch_error = await _fetch_and_filter_async(
-            claim, snippets, urls, hits=hits
-        )
+        try:
+            pages_text, pages, fetch_error, filtered = await _fetch_and_filter_async(
+                claim, snippets, urls, hits=hits
+            )
+        except Exception as exc:
+            pages_text, pages, fetch_error, filtered = (
+                "",
+                [],
+                f"{type(exc).__name__}: {exc}",
+                False,
+            )
         if pages_text:
             evidence_kind = "pages"
-        elif fetch_error and not error:
-            error = fetch_error
     return {
         "snippets": snippets,
         "query": query,
         "error": error,
+        "fetch_error": fetch_error,
         "pages_text": pages_text,
         "pages": pages,
+        "filtered": filtered,
         "evidence_kind": evidence_kind,
         "urls": urls,
     }
@@ -425,8 +617,10 @@ def _live_evidence(claim: str) -> dict:
             "snippets": "",
             "query": (claim or "").strip()[:SEARCH_CHARS],
             "error": f"{type(error).__name__}: {error}",
+            "fetch_error": None,
             "pages_text": "",
             "pages": [],
+            "filtered": False,
             "evidence_kind": "snippets",
             "urls": [],
         }
@@ -451,6 +645,8 @@ def verify_seed_answer(
     claim_rows = []
     for candidate in candidates:
         claim_text = candidate["claim"]
+        fetch_error = None
+        filtered = False
         if search_fn is not None:
             snippets, query, error = search_fn(claim_text)
             pages_text = ""
@@ -461,17 +657,18 @@ def verify_seed_answer(
                 pages_text, pages, fetch_error = fetch_fn(claim_text, snippets, urls)
                 if pages_text:
                     evidence_kind = "pages"
-                elif fetch_error and not error:
-                    error = fetch_error
+                    filtered = True
         else:
             live = _live_evidence(claim_text)
             snippets = live["snippets"]
             query = live["query"]
             error = live["error"]
+            fetch_error = live.get("fetch_error")
             pages_text = live["pages_text"]
             pages = live["pages"]
             evidence_kind = live["evidence_kind"]
             urls = live.get("urls") or []
+            filtered = bool(live.get("filtered"))
         evidence = format_evidence(pages_text, snippets)
         if error and not snippets and not pages_text:
             judged = {"verdict": "insufficient", "reason": error}
@@ -485,9 +682,12 @@ def verify_seed_answer(
                 "snippets": (snippets or "")[:4000],
                 "pages_text": (pages_text or "")[:4000],
                 "pages": pages,
+                "fetched_pages": len(pages or []),
+                "filtered": filtered,
                 "urls": urls[: MAX_URLS_TO_FETCH + MAX_PDFS_TO_FETCH],
                 "evidence_kind": evidence_kind,
                 "search_error": error,
+                "fetch_error": fetch_error,
                 **judged,
             }
         )
@@ -506,6 +706,7 @@ def verify_seed_answer(
         false_claim = ""
         entities = []
     used_pages = any(row.get("evidence_kind") == "pages" for row in claim_rows)
+    n_fetch_errors = sum(1 for row in claim_rows if row.get("fetch_error"))
     return {
         "method": "webscraper",
         "evidence_kind": "pages" if used_pages else "snippets",
@@ -514,5 +715,7 @@ def verify_seed_answer(
         "false_claim": false_claim,
         "entities": entities,
         "reason": reason,
+        "fetch_backend": describe_fetch_backend(),
         "claims": claim_rows,
+        "fetch_errors": n_fetch_errors,
     }

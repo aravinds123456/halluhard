@@ -105,7 +105,7 @@ python forecasting/pipeline.py report --tree forecasting/cascade_tree_dnv.jsonl
 
 A 100-seed tree without `forecasting/results/pilot.json` from step 2 exits with the lecture warning. Prompts are `forecasting/prompts/pack.json`; every row stores `prompt_pack_version` and `prompt_ids`.
 
-The GPT-5-mini **seed** judge is `seed_judge` (`seed_judge.v5`) plus HalluHard **webscraper** evidence: extract checkable particulars, Serper-search, fetch top pages/PDFs, label Hallucinating only if a particular is contradicted or fabricated. A true textbook mechanism with no citation is not a hallucination. Failed fetches fall back to snippets and stay Not Hallucinating. The tree labels DROP/CORRECT/REPEAT/DEPEND use a different prompt, `turn_label`. After changing `seed_judge` or the webscraper step, relabel saved answers without regenerating GPT-OSS:
+The GPT-5-mini **seed** judge is `seed_judge` (`seed_judge.v5`) plus HalluHard **webscraper** evidence: extract checkable particulars, Serper-search, fetch top pages/PDFs, label Hallucinating only if a particular is contradicted or fabricated. A true textbook mechanism with no citation is not a hallucination. Failed fetches fall back to snippets and stay Not Hallucinating. HTML fetch uses httpx and does not import `aiohttp`; if `judge_raw` shows `fetch_error: ModuleNotFoundError: No module named 'aiohttp'` on every claim with `fetched_pages: 0`, that run never saw page text — pull this checkout and rejudge. The tree labels DROP/CORRECT/REPEAT/DEPEND use a different prompt, `turn_label`. After changing `seed_judge` or the webscraper step, relabel saved answers without regenerating GPT-OSS:
 
 ```bash
 git pull halluhard main
@@ -179,6 +179,15 @@ Do not point `--seeds` at a Qwen file if the tree is GPT-OSS. Do not mix the old
 | `SERPER_API_KEY` | — | Web search for seed claims (HalluHard webscraper path) |
 | `CASCADE_WEB` | `1` | Set `0` for LLM-only seed claims (`--no-web`) |
 | `CASCADE_WEB_FETCH` | `1` | Set `0` to judge Serper snippets without fetching pages |
+
+Page fetch uses **httpx** (already pulled in by `openai`). It does **not** need `aiohttp` for HTML. `aiohttp` is only the HalluHard PDF downloader; if it is missing, HTML pages are still fetched and PDFs are skipped. `judge_raw` stores `fetched_pages`, `filtered`, `fetch_error`, and `search_error` separately so a missing PDF library cannot look like a search failure.
+
+If rejudge prints `WARNING: page fetch unavailable (httpx missing)` or every claim has `fetched_pages: 0` with a `ModuleNotFoundError`, install the fetch extras and re-run `--rejudge` — do not treat that run as a webscraper result:
+
+```bash
+pip install httpx aiohttp beautifulsoup4 lxml trafilatura
+python forecasting/generate_seeds.py --pilot --rejudge
+```
 | `MAX_QUESTIONS` | all HalluHard items | Cap seed generation |
 | `MAX_EXAMPLES` | `100` | Seeds in the tree |
 | `NUM_TURNS` | `2` | Tree depth |

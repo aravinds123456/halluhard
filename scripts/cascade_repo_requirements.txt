@@ -3,3 +3,8 @@ transformers
 openai
 google-genai
 fpdf2
+httpx
+aiohttp
+beautifulsoup4
+lxml
+trafilatura

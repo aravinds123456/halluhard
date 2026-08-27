@@ -186,7 +186,7 @@ class LabelTests(unittest.TestCase):
     def test_fresh_deletes_existing_tree_and_rewrites(self):
         import argparse
         from pipeline import TREE_RUNNER, cmd_tree
-        self.assertEqual(TREE_RUNNER, "hall-only-v6")
+        self.assertEqual(TREE_RUNNER, "hall-only-v7")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "tree.jsonl"
             out.write_text('{"branch_id": "stale", "tree_depth": 1}\n')
@@ -812,6 +812,9 @@ class WebVerifyTests(unittest.TestCase):
         self.assertTrue(result["hallucinating"])
         self.assertEqual(result["method"], "webscraper")
         self.assertEqual(result["evidence_kind"], "pages")
+        self.assertEqual(result["claims"][0]["fetched_pages"], 1)
+        self.assertTrue(result["claims"][0]["filtered"])
+        self.assertIsNone(result["claims"][0]["fetch_error"])
         self.assertIn("silicon V-center", prompts[-1])
         self.assertIn("Fetched page/PDF passages", prompts[-1])
 
@@ -835,8 +838,115 @@ class WebVerifyTests(unittest.TestCase):
         )
         self.assertFalse(result["hallucinating"])
         self.assertEqual(result["evidence_kind"], "snippets")
+        self.assertEqual(result["claims"][0]["fetched_pages"], 0)
+        self.assertFalse(result["claims"][0]["filtered"])
+        self.assertEqual(result["claims"][0]["fetch_error"], "403")
+        self.assertIsNone(result["claims"][0]["search_error"])
         self.assertIn("page fetch failed", prompts[-1])
         self.assertIn("snippet about vacancies", prompts[-1])
+
+    def test_aiohttp_import_error_keeps_snippets_and_is_not_a_hallucination(self):
+        import web_verify
+
+        prompts = []
+
+        def fake_gpt(prompt, as_json=True, **kwargs):
+            prompts.append(prompt)
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "Vacancies bind excitons in GaAs.", "entities": ["GaAs"]}]}
+            return {"verdict": "supported", "reason": "textbook mechanism"}
+
+        async def fake_search(claim, num_results=5):
+            return {
+                "snippets": "Vacancies in GaAs form bound-exciton states.",
+                "query": claim,
+                "error": None,
+                "hits": [{"title": "GaAs", "url": "https://example.edu/gaas", "snippet": "s"}],
+                "urls": ["https://example.edu/gaas"],
+            }
+
+        async def boom(claim, snippets, urls, hits=None):
+            raise ModuleNotFoundError("No module named 'aiohttp'")
+
+        previous_search = web_verify._serper_search_async
+        previous_fetch = web_verify._fetch_and_filter_async
+        web_verify._serper_search_async = fake_search
+        web_verify._fetch_and_filter_async = boom
+        self.addCleanup(lambda: setattr(web_verify, "_serper_search_async", previous_search))
+        self.addCleanup(lambda: setattr(web_verify, "_fetch_and_filter_async", previous_fetch))
+
+        result = web_verify.verify_seed_answer("q", "a", fake_gpt)
+        self.assertFalse(result["hallucinating"])
+        self.assertEqual(result["evidence_kind"], "snippets")
+        row = result["claims"][0]
+        self.assertIn("bound-exciton", row["snippets"])
+        self.assertEqual(row["fetched_pages"], 0)
+        self.assertFalse(row["filtered"])
+        self.assertIsNone(row["search_error"])
+        self.assertIn("aiohttp", row["fetch_error"] or "")
+        self.assertIn("bound-exciton", prompts[-1])
+        self.assertIn("page fetch failed", prompts[-1])
+
+    def test_httpx_html_fetch_does_not_need_aiohttp(self):
+        import web_verify
+
+        html = """<html><head><script>void 0</script></head>
+        <body><h1>Si V-center</h1>
+        <p>The 3.365 eV line is a silicon V-center, not GaAs.</p>
+        <p>That assignment is standard in the silicon vacancy literature and
+        does not apply to gallium arsenide excitonic lines.</p>
+        <a href="/paper.pdf">pdf</a></body></html>"""
+
+        async def fake_html(url):
+            return html, None
+
+        previous = web_verify._get_html
+        web_verify._get_html = fake_html
+        self.addCleanup(lambda: setattr(web_verify, "_get_html", previous))
+
+        text, pages, error, filtered = web_verify._run_async(
+            web_verify._fetch_and_filter_async(
+                "the D-line in GaAs is at 3.365 eV",
+                "thin snippet",
+                ["https://example.edu/si"],
+            )
+        )
+        self.assertIsNone(error)
+        self.assertEqual(len(pages), 1)
+        self.assertIn("silicon V-center", text)
+        self.assertNotIn("void 0", text)
+        self.assertEqual(pages[0]["kind"], "html")
+
+    def test_stdlib_html_strip_drops_scripts(self):
+        import web_verify
+
+        text = web_verify._html_to_text(
+            "<html><script>secret()</script><p>Vacancies bind excitons in GaAs.</p></html>"
+        )
+        self.assertIn("Vacancies bind excitons", text)
+        self.assertNotIn("secret()", text)
+        self.assertTrue(web_verify._is_pdf_url("https://arxiv.org/pdf/1234.5678"))
+        self.assertFalse(web_verify._is_pdf_url("https://example.edu/si"))
+
+    def test_fetch_backend_status_does_not_require_aiohttp(self):
+        import web_verify
+
+        status = web_verify.fetch_backend_status()
+        self.assertTrue(status["httpx"])
+        self.assertTrue(status["html_fetch"])
+        self.assertIn("httpx", web_verify.describe_fetch_backend())
+        summary = web_verify.evidence_summary(
+            [
+                {
+                    "claims": [
+                        {"evidence_kind": "snippets", "fetch_error": "ModuleNotFoundError: No module named 'aiohttp'"},
+                        {"evidence_kind": "pages", "fetch_error": None},
+                    ]
+                }
+            ]
+        )
+        self.assertIn("1/2 claims used fetched pages", summary)
+        self.assertIn("aiohttp", summary)
 
 
 if __name__ == "__main__":

@@ -291,10 +291,13 @@ def rejudge_existing(question_items, pilot: bool) -> None:
         f"Rejudging {len(targets)} saved answers with {prompt_ids()['seed_judge']} "
         f"(pack v{prompt_pack_version()}). GPT-OSS is not called."
     )
+    if web_verify.web_requested() and not web_verify.fetch_flag_disabled():
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     if judge_backend() == "gemini":
         setup_gemini()
     judge_name = active_judge_model()
     label_counts = Counter()
+    verifications = []
     for index, record_index in enumerate(targets, start=1):
         record = records[record_index]
         answer = (record.get("model_answer") or record.get("qwen_answer") or "").strip()
@@ -305,6 +308,8 @@ def rejudge_existing(question_items, pilot: bool) -> None:
             print(f"{progress}: empty answer, skipping")
             continue
         label, reason, judge_raw, web_verification = judge_seed(question, answer)
+        if web_verification is not None:
+            verifications.append(web_verification)
         label_counts[label] += 1
         records[record_index] = apply_seed_judgement(
             record, label, reason, judge_raw, judge_name, web_verification=web_verification
@@ -316,6 +321,9 @@ def rejudge_existing(question_items, pilot: bool) -> None:
     print(f"\nRejudged {total} answers: {hallucinating} hallucinating, {total - hallucinating} clean")
     if total:
         print(f"Hallucination rate: {hallucinating / total:.1%}")
+    if verifications:
+        print(web_verify.evidence_summary(verifications))
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     print(f"Wrote {SEEDS_PATH}")
     if pilot:
         write_pilot_stage("seeds", n=len(question_items), judged=total, model=MODEL_NAME)
@@ -372,6 +380,7 @@ def main():
             "Seed evidence: gpt-5-mini-medium thinking + Serper search + page/PDF fetch "
             "(HalluHard --type webscraper)"
         )
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     print(f"Thinking: {'on' if ENABLE_THINKING else 'off'}")
     print(f"Prompt pack: v{prompt_pack_version()} ids={prompt_ids()}")
     print("Workflow: debug prompts on ~10 examples (--pilot), then scale.")

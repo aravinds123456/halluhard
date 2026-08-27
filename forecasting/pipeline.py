@@ -22,7 +22,7 @@ if str(DIR) not in sys.path:
 
 # Printed at the start of every tree run. If this string is missing from stdout,
 # the file on disk is still an old pipeline.py (merge did not land).
-TREE_RUNNER = "hall-only-v6"
+TREE_RUNNER = "hall-only-v7"
 
 from cascade import (
     BATCH,
@@ -441,6 +441,7 @@ def cmd_tree(args) -> None:
             "Seed claims: gpt-5-mini-medium thinking + Serper search + page/PDF fetch "
             "(HalluHard --type webscraper)"
         )
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     cats = _resolve_categories(args.categories)
     raw_seeds = [
         r for r in rows(Path(args.seeds))
