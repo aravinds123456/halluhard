@@ -49,7 +49,7 @@ Algoverse lecture (23 Aug 2026) — do this in order
 ==================================================
 1. Iterate small. Debug prompts on ~10 examples before any 100+ run:
      python forecasting/generate_seeds.py --pilot
-     python forecasting/pipeline.py tree --pilot --resume
+     python forecasting/pipeline.py tree --pilot --fresh --out forecasting/cascade_tree_pilot.jsonl
    Sending 100+ first creates expensive, untraceable errors.
 
 2. Version prompts. All judge/follow-up text lives in
@@ -583,7 +583,7 @@ CORRECT = recovery.</p>
 <div class="note"><strong>This is still a partial run.</strong>
 Planned {complete['planned_branches']} branches; captured {complete['captured_branches']}.
 Captured domain mix: {html_escape(domain_mix)}. Debug prompts on ~10 examples first:
-<code>python forecasting/pipeline.py tree --pilot --resume</code>, then scale.
+<code>python forecasting/pipeline.py tree --pilot --fresh --out forecasting/cascade_tree_pilot.jsonl</code>, then scale.
 Do not cherry-pick. Do not overclaim.
 </div>
 <h2>Headline findings (same-seed, stronger than the formatted PDF)</h2>

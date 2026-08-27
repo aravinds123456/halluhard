@@ -63,8 +63,8 @@ export OPENAI_API_KEY=...   # gpt-5-mini
 
 python forecasting/generate_seeds.py --pilot
 # tree only after seeds_gpt-oss-20b.jsonl has Hallucinating rows
-python forecasting/pipeline.py tree --pilot --seeds forecasting/seeds_gpt-oss-20b.jsonl --resume
-python forecasting/pipeline.py report --tree forecasting/cascade_tree.jsonl
+python forecasting/pipeline.py tree --pilot --fresh --seeds forecasting/seeds_gpt-oss-20b.jsonl --out forecasting/cascade_tree_pilot.jsonl --levels 2
+python forecasting/pipeline.py report --tree forecasting/cascade_tree_pilot.jsonl
 ```
 
 Scale to 100 seeds only after that 10-example debug looks right (same `forecasting/prompts/pack.json`). Full commands, env knobs, and empty-generation notes: **[forecasting/README.md](forecasting/README.md)**.

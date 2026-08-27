@@ -145,6 +145,7 @@ class LabelTests(unittest.TestCase):
                 model="gpt-oss-20b",
                 pilot=False,
                 skip_pilot=True,
+                fresh=False,
             )
             cmd_tree(args)
             rows_ = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
@@ -154,6 +155,50 @@ class LabelTests(unittest.TestCase):
             out.write_text("\n".join(json.dumps(row) for row in rows_) + "\n")
             args.resume = True
             cmd_tree(args)
+
+    def test_fresh_and_resume_are_mutually_exclusive(self):
+        import argparse
+        from pipeline import cmd_tree
+        args = argparse.Namespace(
+            categories="all",
+            seeds=str(Path(__file__).resolve().parent / "batch_results.jsonl"),
+            max_seeds=1,
+            levels=2,
+            out="unused.jsonl",
+            resume=True,
+            dry_run=True,
+            model="gpt-oss-20b",
+            pilot=False,
+            skip_pilot=True,
+            fresh=True,
+        )
+        with self.assertRaises(SystemExit):
+            cmd_tree(args)
+
+    def test_fresh_deletes_existing_tree_and_rewrites(self):
+        import argparse
+        from pipeline import TREE_RUNNER, cmd_tree
+        self.assertEqual(TREE_RUNNER, "hall-only-v3")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "tree.jsonl"
+            out.write_text('{"branch_id": "stale", "tree_depth": 1}\n')
+            args = argparse.Namespace(
+                categories="all",
+                seeds=str(Path(__file__).resolve().parent / "batch_results.jsonl"),
+                max_seeds=1,
+                levels=2,
+                out=str(out),
+                resume=False,
+                dry_run=True,
+                model="gpt-oss-20b",
+                pilot=False,
+                skip_pilot=True,
+                fresh=True,
+            )
+            cmd_tree(args)
+            rows_ = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            self.assertTrue(rows_)
+            self.assertFalse(any(row.get("branch_id") == "stale" for row in rows_))
 
 
 class DesignDefaultTests(unittest.TestCase):
@@ -395,6 +440,7 @@ class PartialRunTests(unittest.TestCase):
                 model="gpt-oss-20b",
                 pilot=False,
                 skip_pilot=True,
+                fresh=False,
             )
             cmd_tree(args)
             lines = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]

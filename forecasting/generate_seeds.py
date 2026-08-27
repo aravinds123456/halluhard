@@ -278,7 +278,10 @@ def rejudge_existing(question_items, pilot: bool) -> None:
     if pilot:
         write_pilot_stage("seeds", n=len(question_items), judged=total, model=MODEL_NAME)
         print("Recorded 10-example seed-prompt debug in forecasting/results/pilot.json")
-    print(f"\nNext: python forecasting/pipeline.py tree --pilot --seeds {SEEDS_PATH} --resume")
+    print(
+        f"\nNext: python forecasting/pipeline.py tree --pilot --fresh "
+        f"--seeds {SEEDS_PATH} --out forecasting/cascade_tree_pilot.jsonl --levels 2"
+    )
 
 
 def main():
@@ -429,10 +432,14 @@ def main():
     if pilot:
         write_pilot_stage("seeds", n=len(question_items), judged=total, model=MODEL_NAME)
         print("Recorded 10-example seed-prompt debug in forecasting/results/pilot.json")
-        print(f"\nNext: python forecasting/pipeline.py tree --pilot --seeds {SEEDS_PATH} --resume")
+        print(
+            f"\nNext: python forecasting/pipeline.py tree --pilot --fresh "
+            f"--seeds {SEEDS_PATH} --out forecasting/cascade_tree_pilot.jsonl --levels 2"
+        )
     else:
         print(
-            f"\nNext: python forecasting/pipeline.py tree --pilot --seeds {SEEDS_PATH} --resume"
+            f"\nNext: python forecasting/pipeline.py tree --pilot --fresh "
+            f"--seeds {SEEDS_PATH} --out forecasting/cascade_tree_pilot.jsonl --levels 2"
             "\nThen scale: python forecasting/pipeline.py tree --seeds "
             f"{SEEDS_PATH} --max-seeds 100 --levels 2 --resume"
         )

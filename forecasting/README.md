@@ -77,8 +77,14 @@ export OPENAI_API_KEY=...
 # 1) Debug seed-judge prompts on ~10 questions (required before a large seed run)
 python forecasting/generate_seeds.py --pilot
 
-# 2) Debug follow-up prompts on ~10 seeds (required before --max-seeds 100)
-python forecasting/pipeline.py tree --pilot --seeds forecasting/seeds_gpt-oss-20b.jsonl --resume
+# 2) Debug follow-up prompts on ~10 seeds (required before --max-seeds 100).
+#    Use --fresh, not --resume: a crashed pilot file is not reusable.
+python forecasting/pipeline.py tree \
+  --pilot \
+  --fresh \
+  --seeds forecasting/seeds_gpt-oss-20b.jsonl \
+  --out forecasting/cascade_tree_pilot.jsonl \
+  --levels 2
 
 # 3) Scale only after those 10-example runs look right (same prompt pack)
 python forecasting/generate_seeds.py

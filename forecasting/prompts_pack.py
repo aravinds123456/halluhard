@@ -26,7 +26,7 @@ PILOT_ERROR = """
 Start with ~10 examples to debug prompts before scaling.
 
     python forecasting/generate_seeds.py --pilot
-    python forecasting/pipeline.py tree --pilot --resume
+    python forecasting/pipeline.py tree --pilot --fresh --out forecasting/cascade_tree_pilot.jsonl
 
 A 100-seed Azure run without that step is the expensive, untraceable
 error the Algoverse lecture warned about. Re-run --pilot after any

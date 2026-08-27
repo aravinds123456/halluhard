@@ -1,7 +1,7 @@
 """Cascade pipeline: 3-ary D/N/V tree + HallucinationResearchTest labels.
 
   python forecasting/generate_seeds.py --pilot
-  python forecasting/pipeline.py tree --pilot --resume
+  python forecasting/pipeline.py tree --pilot --fresh --seeds forecasting/seeds_gpt-oss-20b.jsonl --out forecasting/cascade_tree_pilot.jsonl --levels 2
   python forecasting/pipeline.py tree --max-seeds 100 --levels 2 --resume
   python forecasting/pipeline.py report --from-partial
   python forecasting/pipeline.py tree --dry-run --max-seeds 2
@@ -19,6 +19,10 @@ from pathlib import Path
 DIR = Path(__file__).resolve().parent
 if str(DIR) not in sys.path:
     sys.path.insert(0, str(DIR))
+
+# Printed at the start of every tree run. If this string is missing from stdout,
+# the file on disk is still an old pipeline.py (merge did not land).
+TREE_RUNNER = "hall-only-v3"
 
 from cascade import (
     BATCH,
@@ -358,6 +362,22 @@ def _write_skipped_branch(
 
 def cmd_tree(args) -> None:
     """Step C: full 3-ary D/N/V tree. Level 1 = 3 prompts, level 2 = 9 more (3^2+3)."""
+    print(
+        f"Tree runner {TREE_RUNNER}: content_filter skip, safe resume, --fresh. "
+        "If you do not see this line, pipeline.py was not updated."
+    )
+    if getattr(args, "fresh", False) and getattr(args, "resume", False):
+        raise SystemExit("Use --fresh or --resume, not both. --fresh starts a new tree file.")
+    if getattr(args, "fresh", False):
+        args.resume = False
+        stale = Path(args.out)
+        if stale.exists():
+            stale.unlink()
+            print(f"Starting fresh: removed {stale}")
+        else:
+            print(f"Starting fresh: {stale}")
+    elif getattr(args, "resume", False):
+        print("Resuming saved nodes. For a new 10-seed tree, drop --resume and pass --fresh.")
     if getattr(args, "pilot", False):
         args.max_seeds = DEFAULT_PILOT_SEEDS
     require_pilot(
@@ -685,6 +705,11 @@ def main() -> None:
         "--skip-pilot",
         action="store_true",
         help="allow >10 seeds without a recorded 10-example prompt debug",
+    )
+    tree.add_argument(
+        "--fresh",
+        action="store_true",
+        help="delete --out and start a new tree (do not combine with --resume)",
     )
     label = sub.add_parser("label", help="label branch outcomes")
     label.add_argument("--tree", default=str(TREE))
