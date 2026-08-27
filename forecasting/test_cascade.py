@@ -186,7 +186,7 @@ class LabelTests(unittest.TestCase):
     def test_fresh_deletes_existing_tree_and_rewrites(self):
         import argparse
         from pipeline import TREE_RUNNER, cmd_tree
-        self.assertEqual(TREE_RUNNER, "hall-only-v5")
+        self.assertEqual(TREE_RUNNER, "hall-only-v7")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "tree.jsonl"
             out.write_text('{"branch_id": "stale", "tree_depth": 1}\n')
@@ -278,6 +278,7 @@ class DesignDefaultTests(unittest.TestCase):
             },
         ]
         self.assertEqual(rejudge_target_indexes(records, {0, 2}), [0])
+        self.assertEqual(rejudge_target_indexes(records, None, limit=2), [0, 2])
         updated = apply_seed_judgement(
             records[0],
             "Hallucinating",
@@ -288,7 +289,70 @@ class DesignDefaultTests(unittest.TestCase):
         self.assertEqual(updated["model_answer"], "The radius is 13.02 km.")
         self.assertEqual(updated["gemini_judgement"], "Overall label: Hallucinating")
         self.assertEqual(updated["prompt_ids"]["seed_judge"], "seed_judge.v5")
-        self.assertEqual(updated["prompt_pack_version"], 5)
+        self.assertEqual(updated["prompt_pack_version"], 6)
+
+    def test_argv_limit_parses_space_and_equals(self):
+        import generate_seeds
+
+        previous = sys.argv
+        self.addCleanup(lambda: setattr(sys, "argv", previous))
+        sys.argv = ["generate_seeds.py", "--rejudge", "--limit", "400"]
+        self.assertEqual(generate_seeds.argv_option_int("--limit"), 400)
+        sys.argv = ["generate_seeds.py", "--limit=12", "--tree"]
+        self.assertEqual(generate_seeds.argv_option_int("--limit"), 12)
+        sys.argv = ["generate_seeds.py"]
+        self.assertIsNone(generate_seeds.argv_option_int("--limit"))
+
+    def test_scale_dry_run_rejudges_limit_then_trees_those_halls(self):
+        import generate_seeds
+
+        previous_seeds = generate_seeds.SEEDS_PATH
+        previous_pool = generate_seeds.REJUDGE_POOL_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            seeds = Path(tmp) / "seeds.jsonl"
+            pool = Path(tmp) / "pool.jsonl"
+            out = Path(tmp) / "tree.jsonl"
+            rows = []
+            for i, domain in enumerate(("research", "legal", "medical", "research")):
+                qid = i if domain == "research" else (100000 + i if domain == "legal" else 200000 + i)
+                hall = i < 3
+                rows.append(
+                    {
+                        "seed_schema_version": 3,
+                        "question_number": qid,
+                        "sample_index": 0,
+                        "domain": domain,
+                        "question": f"Question {i}?",
+                        "model_answer": f"Answer {i} with a false particular.",
+                        "qwen_answer": f"Answer {i} with a false particular.",
+                        "model_name": "gpt-oss-20b",
+                        "gemini_judgement": (
+                            "Overall label: Hallucinating" if hall else "Overall label: Not Hallucinating"
+                        ),
+                        "duplicate_answer": False,
+                    }
+                )
+            seeds.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            generate_seeds.SEEDS_PATH = seeds
+            generate_seeds.REJUDGE_POOL_PATH = pool
+            self.addCleanup(lambda: setattr(generate_seeds, "SEEDS_PATH", previous_seeds))
+            self.addCleanup(lambda: setattr(generate_seeds, "REJUDGE_POOL_PATH", previous_pool))
+            generate_seeds.run_rejudge_then_tree(
+                limit=3,
+                tree_out=out,
+                max_seeds=0,
+                levels=2,
+                fresh=True,
+                resume=False,
+                skip_pilot=True,
+                dry_run=True,
+                no_web=True,
+            )
+            pool_rows = [json.loads(line) for line in pool.read_text().splitlines() if line.strip()]
+            self.assertEqual(len(pool_rows), 3)
+            self.assertTrue(all(row["gemini_judgement"].startswith("Overall label: Hallucinating") for row in pool_rows))
+            tree_rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            self.assertEqual(len(tree_rows), 36)
 
 
 class SamplingTests(unittest.TestCase):
@@ -478,7 +542,7 @@ class PartialRunTests(unittest.TestCase):
             self.assertFalse(any("persisted_active" in json.dumps(row) or "persisted_dormant" in json.dumps(row) for row in lines))
             self.assertTrue(all(row.get("seed_class") in {"hallucinating", "not_hallucinating"} for row in lines))
             self.assertTrue(all(row.get("domain_group") in {"research", "other"} for row in lines))
-            self.assertTrue(all(row.get("prompt_pack_version") == 5 for row in lines))
+            self.assertTrue(all(row.get("prompt_pack_version") == 6 for row in lines))
             self.assertTrue(all("seed_judge.v5" in row.get("prompt_ids", {}).values() for row in lines))
             self.assertTrue(all(row.get("last_turn_label") == "DROP" for row in lines))
 
@@ -649,18 +713,19 @@ class AzureDeploymentTests(unittest.TestCase):
 class AlgoverseWorkflowTests(unittest.TestCase):
     def test_prompts_are_loaded_from_versioned_json(self):
         from prompts_pack import fill_prompt, prompt_ids, prompt_pack_version, prompt_text
-        self.assertEqual(prompt_pack_version(), 5)
+        self.assertEqual(prompt_pack_version(), 6)
         self.assertEqual(prompt_ids()["seed_judge"], "seed_judge.v5")
         self.assertEqual(prompt_ids()["turn_label"], "p_turn.v3")
         self.assertEqual(prompt_ids()["draft_follow_up"], "p_draft.v3")
         self.assertEqual(prompt_ids()["claim"], "p_claim.v2")
         self.assertEqual(prompt_ids()["claim_control"], "p_claim_control.v2")
         self.assertEqual(prompt_ids()["claim_candidates"], "p_claim_candidates.v1")
-        self.assertEqual(prompt_ids()["web_claim_judge"], "p_web_claim.v1")
+        self.assertEqual(prompt_ids()["web_claim_judge"], "p_web_claim.v2")
         self.assertIn("use DEPEND, not REPEAT", prompt_text("turn_label"))
         self.assertIn("Hallucinating", prompt_text("seed_judge"))
         self.assertIn("Lack of a citation is not a hallucination", prompt_text("seed_judge"))
-        self.assertIn("Serper", prompt_text("web_claim_judge"))
+        self.assertIn("webscraper", prompt_text("web_claim_judge"))
+        self.assertIn("{evidence}", prompt_text("web_claim_judge"))
         self.assertNotIn("without any supporting citation", prompt_text("seed_judge"))
         filled = fill_prompt("seed_judge", question="Q?", answer="A.")
         self.assertIn("Q?", filled)
@@ -670,6 +735,11 @@ class AlgoverseWorkflowTests(unittest.TestCase):
         self.assertIn("No, C is false.", aliased)
         self.assertNotIn("{follow_up}", aliased)
         self.assertNotIn("{answer}", aliased)
+        evidence = fill_prompt("web_claim_judge", claim="the D-line", snippets="thin snippet")
+        self.assertIn("the D-line", evidence)
+        self.assertIn("thin snippet", evidence)
+        self.assertNotIn("{evidence}", evidence)
+        self.assertNotIn("{claim}", evidence)
 
     def test_scaling_past_ten_requires_a_matching_pilot(self):
         import prompts_pack
@@ -701,8 +771,8 @@ class WebVerifyTests(unittest.TestCase):
         result = web_verify.verify_seed_answer("q", "a", fake_gpt, search_fn=fake_search)
         self.assertFalse(result["hallucinating"])
         self.assertEqual(result["false_claim"], "")
-        self.assertEqual(result["method"], "serper")
-        self.assertEqual(result["judge"], "gpt-5-mini-medium")
+        self.assertEqual(result["method"], "webscraper")
+        self.assertEqual(result["evidence_kind"], "snippets")
         self.assertEqual(result["judge"], "gpt-5-mini-medium")
 
     def test_contradicted_particular_is_the_cascade_claim(self):
@@ -778,6 +848,169 @@ class WebVerifyTests(unittest.TestCase):
             web_verify.require_serper_unless_disabled(dry_run=False)
         self.assertIn("SERPER_API_KEY", str(raised.exception))
         web_verify.require_serper_unless_disabled(dry_run=True)
+
+    def test_fetched_pages_are_what_the_judge_sees(self):
+        import web_verify
+
+        prompts = []
+
+        def fake_gpt(prompt, as_json=True, **kwargs):
+            prompts.append(prompt)
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "the D-line in GaAs is at 3.365 eV", "entities": ["3.365 eV"]}]}
+            return {"verdict": "contradicted", "reason": "page says 3.365 eV is silicon"}
+
+        def fake_search(claim):
+            return "thin snippet", claim, None
+
+        def fake_fetch(claim, snippets, urls):
+            return (
+                "The 3.365 eV line is a silicon V-center, not GaAs.",
+                [{"title": "Si V-center", "url": "https://example.edu/si", "kind": "html"}],
+                None,
+            )
+
+        result = web_verify.verify_seed_answer(
+            "q", "a", fake_gpt, search_fn=fake_search, fetch_fn=fake_fetch
+        )
+        self.assertTrue(result["hallucinating"])
+        self.assertEqual(result["method"], "webscraper")
+        self.assertEqual(result["evidence_kind"], "pages")
+        self.assertEqual(result["claims"][0]["fetched_pages"], 1)
+        self.assertTrue(result["claims"][0]["filtered"])
+        self.assertIsNone(result["claims"][0]["fetch_error"])
+        self.assertIn("silicon V-center", prompts[-1])
+        self.assertIn("Fetched page/PDF passages", prompts[-1])
+
+    def test_fetch_failure_falls_back_to_snippets_without_inventing_a_hall(self):
+        import web_verify
+
+        prompts = []
+
+        def fake_gpt(prompt, as_json=True, **kwargs):
+            prompts.append(prompt)
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "Vacancies bind excitons in GaAs.", "entities": ["GaAs"]}]}
+            return {"verdict": "insufficient", "reason": "thin"}
+
+        result = web_verify.verify_seed_answer(
+            "q",
+            "a",
+            fake_gpt,
+            search_fn=lambda claim: ("snippet about vacancies", claim, None),
+            fetch_fn=lambda claim, snippets, urls: ("", [], "403"),
+        )
+        self.assertFalse(result["hallucinating"])
+        self.assertEqual(result["evidence_kind"], "snippets")
+        self.assertEqual(result["claims"][0]["fetched_pages"], 0)
+        self.assertFalse(result["claims"][0]["filtered"])
+        self.assertEqual(result["claims"][0]["fetch_error"], "403")
+        self.assertIsNone(result["claims"][0]["search_error"])
+        self.assertIn("page fetch failed", prompts[-1])
+        self.assertIn("snippet about vacancies", prompts[-1])
+
+    def test_aiohttp_import_error_keeps_snippets_and_is_not_a_hallucination(self):
+        import web_verify
+
+        prompts = []
+
+        def fake_gpt(prompt, as_json=True, **kwargs):
+            prompts.append(prompt)
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "Vacancies bind excitons in GaAs.", "entities": ["GaAs"]}]}
+            return {"verdict": "supported", "reason": "textbook mechanism"}
+
+        async def fake_search(claim, num_results=5):
+            return {
+                "snippets": "Vacancies in GaAs form bound-exciton states.",
+                "query": claim,
+                "error": None,
+                "hits": [{"title": "GaAs", "url": "https://example.edu/gaas", "snippet": "s"}],
+                "urls": ["https://example.edu/gaas"],
+            }
+
+        async def boom(claim, snippets, urls, hits=None):
+            raise ModuleNotFoundError("No module named 'aiohttp'")
+
+        previous_search = web_verify._serper_search_async
+        previous_fetch = web_verify._fetch_and_filter_async
+        web_verify._serper_search_async = fake_search
+        web_verify._fetch_and_filter_async = boom
+        self.addCleanup(lambda: setattr(web_verify, "_serper_search_async", previous_search))
+        self.addCleanup(lambda: setattr(web_verify, "_fetch_and_filter_async", previous_fetch))
+
+        result = web_verify.verify_seed_answer("q", "a", fake_gpt)
+        self.assertFalse(result["hallucinating"])
+        self.assertEqual(result["evidence_kind"], "snippets")
+        row = result["claims"][0]
+        self.assertIn("bound-exciton", row["snippets"])
+        self.assertEqual(row["fetched_pages"], 0)
+        self.assertFalse(row["filtered"])
+        self.assertIsNone(row["search_error"])
+        self.assertIn("aiohttp", row["fetch_error"] or "")
+        self.assertIn("bound-exciton", prompts[-1])
+        self.assertIn("page fetch failed", prompts[-1])
+
+    def test_httpx_html_fetch_does_not_need_aiohttp(self):
+        import web_verify
+
+        html = """<html><head><script>void 0</script></head>
+        <body><h1>Si V-center</h1>
+        <p>The 3.365 eV line is a silicon V-center, not GaAs.</p>
+        <p>That assignment is standard in the silicon vacancy literature and
+        does not apply to gallium arsenide excitonic lines.</p>
+        <a href="/paper.pdf">pdf</a></body></html>"""
+
+        async def fake_html(url):
+            return html, None
+
+        previous = web_verify._get_html
+        web_verify._get_html = fake_html
+        self.addCleanup(lambda: setattr(web_verify, "_get_html", previous))
+
+        text, pages, error, filtered = web_verify._run_async(
+            web_verify._fetch_and_filter_async(
+                "the D-line in GaAs is at 3.365 eV",
+                "thin snippet",
+                ["https://example.edu/si"],
+            )
+        )
+        self.assertIsNone(error)
+        self.assertEqual(len(pages), 1)
+        self.assertIn("silicon V-center", text)
+        self.assertNotIn("void 0", text)
+        self.assertEqual(pages[0]["kind"], "html")
+
+    def test_stdlib_html_strip_drops_scripts(self):
+        import web_verify
+
+        text = web_verify._html_to_text(
+            "<html><script>secret()</script><p>Vacancies bind excitons in GaAs.</p></html>"
+        )
+        self.assertIn("Vacancies bind excitons", text)
+        self.assertNotIn("secret()", text)
+        self.assertTrue(web_verify._is_pdf_url("https://arxiv.org/pdf/1234.5678"))
+        self.assertFalse(web_verify._is_pdf_url("https://example.edu/si"))
+
+    def test_fetch_backend_status_does_not_require_aiohttp(self):
+        import web_verify
+
+        status = web_verify.fetch_backend_status()
+        self.assertTrue(status["httpx"])
+        self.assertTrue(status["html_fetch"])
+        self.assertIn("httpx", web_verify.describe_fetch_backend())
+        summary = web_verify.evidence_summary(
+            [
+                {
+                    "claims": [
+                        {"evidence_kind": "snippets", "fetch_error": "ModuleNotFoundError: No module named 'aiohttp'"},
+                        {"evidence_kind": "pages", "fetch_error": None},
+                    ]
+                }
+            ]
+        )
+        self.assertIn("1/2 claims used fetched pages", summary)
+        self.assertIn("aiohttp", summary)
 
 
 if __name__ == "__main__":

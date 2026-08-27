@@ -13,6 +13,7 @@ to produce its own seeds before the branching stage runs.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -24,12 +25,15 @@ if str(DIR) not in sys.path:
 
 from cascade import (
     DEFAULT_TEST_MODEL,
+    DEFAULT_TURNS,
     DIR,
     DOMAINS,
     ENABLE_THINKING,
     env_float,
     env_int,
     env_str,
+    hallucinating,
+    judged_seed,
     model_slug,
     seed_identifier,
     strip_question_prefix,
@@ -61,6 +65,8 @@ BASE_SEED = env_int("BASE_SEED", 1234)
 DOMAIN_FILTER = env_str("SEED_DOMAIN", "all")
 
 SEEDS_PATH = Path(env_str("SEEDS_PATH", str(DIR / f"seeds_{model_slug(MODEL_NAME)}.jsonl")))
+REJUDGE_POOL_PATH = DIR / "results" / "rejudge_pool.jsonl"
+DEFAULT_TREE_OUT = DIR / "cascade_tree_dnv.jsonl"
 
 SEED_JUDGE_TEMPLATE = prompt_text("seed_judge")
 
@@ -69,6 +75,43 @@ SEED_LABEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SEED_REASON_PATTERN = re.compile(r"Reason:\s*(.+)", re.IGNORECASE | re.DOTALL)
+
+
+def argv_has(*names: str) -> bool:
+    return any(name in sys.argv for name in names)
+
+
+def argv_option_int(name: str, default: int | None = None) -> int | None:
+    """Parse `--limit 400` or `--limit=400`. Returns default if the flag is absent."""
+    eq = name + "="
+    for index, token in enumerate(sys.argv[1:], start=1):
+        if token == name:
+            if index + 1 < len(sys.argv) and not sys.argv[index + 1].startswith("-"):
+                return int(sys.argv[index + 1])
+            raise SystemExit(f"{name} needs an integer, e.g. {name} 400")
+        if token.startswith(eq):
+            return int(token.split("=", 1)[1])
+    return default
+
+
+def argv_option_str(name: str, default: str | None = None) -> str | None:
+    eq = name + "="
+    for index, token in enumerate(sys.argv[1:], start=1):
+        if token == name:
+            if index + 1 < len(sys.argv) and not sys.argv[index + 1].startswith("-"):
+                return sys.argv[index + 1]
+            raise SystemExit(f"{name} needs a value")
+        if token.startswith(eq):
+            return token.split("=", 1)[1]
+    return default
+
+
+def already_webscraper(record: dict) -> bool:
+    return (
+        record.get("judge_method") == "webscraper"
+        and record.get("prompt_pack_version") == prompt_pack_version()
+        and bool(record.get("web_verification"))
+    )
 
 
 def parse_seed_judgement(text: str) -> tuple[str, str]:
@@ -145,7 +188,8 @@ def load_existing_seeds():
 def load_all_seed_records() -> list[dict]:
     if not SEEDS_PATH.exists():
         return []
-    return [json.loads(line) for line in SEEDS_PATH.open(encoding="utf-8") if line.strip()]
+    with SEEDS_PATH.open(encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
 
 
 def rewrite_seeds(records: list[dict]) -> None:
@@ -177,25 +221,89 @@ def apply_seed_judgement(
         updated["web_verification"] = web_verification
         updated["web_false_claim"] = web_verification.get("false_claim") or ""
         updated["entities"] = web_verification.get("entities") or updated.get("entities") or []
-        updated["judge_method"] = web_verification.get("method") or "serper"
+        updated["judge_method"] = web_verification.get("method") or "webscraper"
     else:
         updated["judge_method"] = updated.get("judge_method") or "llm"
     return updated
 
 
-def rejudge_target_indexes(records: list[dict], question_numbers: set[int]) -> list[int]:
+def rejudge_target_indexes(
+    records: list[dict],
+    question_numbers: set[int] | None,
+    *,
+    limit: int | None = None,
+) -> list[int]:
+    """Indexes of saved seed rows to relabel.
+
+    `--pilot` passes a question-id slice. `--limit 400` without `--pilot`
+    takes the first 400 matching seed *rows*, not the first 400 HalluHard
+    question-bank ids.
+    """
     indexes = []
     for index, record in enumerate(records):
         if record.get("seed_schema_version", 0) != SEED_SCHEMA_VERSION:
             continue
         if record.get("model_name") != MODEL_NAME:
             continue
-        if record.get("question_number") not in question_numbers:
+        if question_numbers is not None and record.get("question_number") not in question_numbers:
             continue
         if record.get("duplicate_answer"):
             continue
         indexes.append(index)
+        if limit is not None and len(indexes) >= limit:
+            break
     return indexes
+
+
+def write_rejudge_pool(records: list[dict], path: Path | None = None) -> list[dict]:
+    """Write the rejudged rows the tree should branch from. Halls are filtered later."""
+    path = Path(path or REJUDGE_POOL_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    halls = [
+        record
+        for record in records
+        if judged_seed(record) and hallucinating(record) and not record.get("duplicate_answer")
+    ]
+    path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    return halls
+
+
+def start_tree_from_pool(
+    *,
+    seeds: Path,
+    out: Path,
+    max_seeds: int,
+    levels: int,
+    fresh: bool,
+    resume: bool,
+    skip_pilot: bool,
+    dry_run: bool,
+    no_web: bool,
+    model: str | None = None,
+) -> None:
+    from argparse import Namespace
+
+    from pipeline import cmd_tree
+
+    cmd_tree(
+        Namespace(
+            seeds=str(seeds),
+            out=str(out),
+            max_seeds=max_seeds,
+            levels=levels,
+            categories="all",
+            dry_run=dry_run,
+            pilot=False,
+            skip_pilot=skip_pilot,
+            fresh=fresh,
+            no_web=no_web,
+            resume=resume,
+            model=model or MODEL_NAME,
+        )
+    )
 
 
 def sample_seed_value(question_number: int, sample_index: int) -> int:
@@ -273,56 +381,138 @@ def judge_seed(question: str, answer: str, *, use_web: bool | None = None):
     return label, reason, raw_text, None
 
 
-def rejudge_existing(question_items, pilot: bool) -> None:
+def rejudge_existing(
+    question_items,
+    pilot: bool,
+    *,
+    limit: int | None = None,
+    resume: bool = False,
+) -> list[dict]:
     """Relabel saved answers with the current seed_judge prompt. Does not call GPT-OSS."""
     from runtime import active_judge_model, judge_backend, setup_gemini
 
     records = load_all_seed_records()
     if not records:
         raise SystemExit(f"No seed file to rejudge at {SEEDS_PATH}")
-    question_numbers = {number for number, _ in question_items}
-    targets = rejudge_target_indexes(records, question_numbers)
+    question_numbers = {number for number, _ in question_items} if question_items is not None else None
+    targets = rejudge_target_indexes(records, question_numbers, limit=limit)
     if not targets:
         raise SystemExit(
-            f"No matching judged rows in {SEEDS_PATH.name} for this --pilot slice. "
+            f"No matching judged rows in {SEEDS_PATH.name} to rejudge. "
             "Generate seeds first, then rejudge."
         )
+    todo = [index for index in targets if not (resume and already_webscraper(records[index]))]
     print(
-        f"Rejudging {len(targets)} saved answers with {prompt_ids()['seed_judge']} "
+        f"Rejudging {len(todo)} saved answers"
+        f"{f' ({len(targets) - len(todo)} already current webscraper, skipped)' if len(todo) != len(targets) else ''}"
+        f" with {prompt_ids()['seed_judge']} "
         f"(pack v{prompt_pack_version()}). GPT-OSS is not called."
     )
+    if web_verify.web_requested() and not web_verify.fetch_flag_disabled():
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
+    if not todo:
+        print("Nothing left to rejudge.")
+        return [records[index] for index in targets]
     if judge_backend() == "gemini":
         setup_gemini()
     judge_name = active_judge_model()
     label_counts = Counter()
-    for index, record_index in enumerate(targets, start=1):
+    verifications = []
+    for index, record_index in enumerate(todo, start=1):
         record = records[record_index]
         answer = (record.get("model_answer") or record.get("qwen_answer") or "").strip()
         question = record.get("question") or ""
         qid = record.get("question_number")
-        progress = f"[{index}/{len(targets)}] q{qid}#{record.get('sample_index', 0)}"
+        progress = f"[{index}/{len(todo)}] q{qid}#{record.get('sample_index', 0)}"
         if not answer:
             print(f"{progress}: empty answer, skipping")
             continue
         label, reason, judge_raw, web_verification = judge_seed(question, answer)
+        if web_verification is not None:
+            verifications.append(web_verification)
         label_counts[label] += 1
         records[record_index] = apply_seed_judgement(
             record, label, reason, judge_raw, judge_name, web_verification=web_verification
         )
+        rewrite_seeds(records)
         print(f"{progress}: {label}" + (f" - {reason[:80]}" if reason else ""))
-    rewrite_seeds(records)
     total = sum(label_counts.values())
-    hallucinating = label_counts["Hallucinating"]
-    print(f"\nRejudged {total} answers: {hallucinating} hallucinating, {total - hallucinating} clean")
+    hallucinating_n = label_counts["Hallucinating"]
+    print(f"\nRejudged {total} answers: {hallucinating_n} hallucinating, {total - hallucinating_n} clean")
     if total:
-        print(f"Hallucination rate: {hallucinating / total:.1%}")
+        print(f"Hallucination rate: {hallucinating_n / total:.1%}")
+    if verifications:
+        print(web_verify.evidence_summary(verifications))
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     print(f"Wrote {SEEDS_PATH}")
     if pilot:
-        write_pilot_stage("seeds", n=len(question_items), judged=total, model=MODEL_NAME)
+        write_pilot_stage("seeds", n=len(question_items or []), judged=total, model=MODEL_NAME)
         print("Recorded 10-example seed-prompt debug in forecasting/results/pilot.json")
+    return [records[index] for index in targets]
+
+
+def run_rejudge_then_tree(
+    *,
+    limit: int = 400,
+    tree_out: Path | None = None,
+    max_seeds: int = 0,
+    levels: int = DEFAULT_TURNS,
+    fresh: bool = True,
+    resume: bool = False,
+    skip_pilot: bool = False,
+    dry_run: bool = False,
+    no_web: bool = False,
+    pilot: bool = False,
+) -> None:
+    """Rejudge `limit` saved seed rows, then grow the D/N/V tree on those halls."""
+    if fresh and resume:
+        raise SystemExit("Use --fresh or --resume, not both.")
+    if no_web:
+        os.environ["CASCADE_WEB"] = "0"
+    require_pilot(stage="seeds", n=10 if pilot else limit, dry_run=dry_run, skip_pilot=skip_pilot)
+    question_items = None
+    if pilot:
+        questions = load_questions()
+        question_items = list(questions.items())[:DEFAULT_PILOT_QUESTIONS]
+        row_limit = None
+    else:
+        row_limit = limit
     print(
-        f"\nNext: python forecasting/pipeline.py tree --pilot --fresh "
-        f"--seeds {SEEDS_PATH} --out forecasting/cascade_tree_pilot.jsonl --levels 2"
+        f"Scale: rejudge {('pilot 10 questions' if pilot else f'{limit} saved seed rows')}"
+        f", then branch the hallucinating ones"
+        f"{' (DRY_RUN: current labels, no judge API)' if dry_run else ''}."
+    )
+    if dry_run:
+        records = load_all_seed_records()
+        targets = rejudge_target_indexes(
+            records,
+            {number for number, _ in question_items} if question_items is not None else None,
+            limit=row_limit,
+        )
+        pool = [records[index] for index in targets]
+        print(f"DRY_RUN=1: would rejudge {len(pool)} rows in {SEEDS_PATH.name}; using current labels for the tree stub.")
+    else:
+        pool = rejudge_existing(question_items, pilot, limit=row_limit, resume=resume)
+    halls = write_rejudge_pool(pool)
+    print(f"Tree pool: {len(halls)} hallucinating / {len(pool)} rejudged -> {REJUDGE_POOL_PATH}")
+    if not halls:
+        raise SystemExit(
+            "No hallucinating seeds in the rejudge pool, so the tree was not started. "
+            "That can be real (conservative webscraper) or a fetch failure — check fetched_pages."
+        )
+    tree_max = max_seeds if max_seeds and max_seeds > 0 else len(halls)
+    out = Path(tree_out or DEFAULT_TREE_OUT)
+    require_pilot(stage="tree", n=tree_max, dry_run=dry_run, skip_pilot=skip_pilot)
+    start_tree_from_pool(
+        seeds=REJUDGE_POOL_PATH,
+        out=out,
+        max_seeds=tree_max,
+        levels=levels,
+        fresh=fresh and not resume,
+        resume=resume,
+        skip_pilot=skip_pilot,
+        dry_run=dry_run,
+        no_web=no_web,
     )
 
 
@@ -330,12 +520,33 @@ def main():
     questions = load_questions()
     processed_samples, answers_by_question = load_existing_seeds()
     question_items = list(questions.items())
-    pilot = "--pilot" in sys.argv
-    skip_pilot = "--skip-pilot" in sys.argv
-    rejudge = "--rejudge" in sys.argv
-    dry_run = env_str("DRY_RUN", "") == "1"
-    limit = DEFAULT_PILOT_QUESTIONS if pilot else MAX_QUESTIONS
+    pilot = argv_has("--pilot")
+    skip_pilot = argv_has("--skip-pilot")
+    rejudge = argv_has("--rejudge")
+    then_tree = argv_has("--tree")
+    resume = argv_has("--resume")
+    dry_run = env_str("DRY_RUN", "") == "1" or argv_has("--dry-run")
+    cli_limit = argv_option_int("--limit")
+    limit = DEFAULT_PILOT_QUESTIONS if pilot else (cli_limit if cli_limit is not None else MAX_QUESTIONS)
+    if then_tree and not rejudge:
+        raise SystemExit("Pass --rejudge --tree together, or use: python forecasting/pipeline.py scale --limit 400")
+    if then_tree and not pilot and not limit:
+        limit = 400
     require_pilot(stage="seeds", n=limit or 10**9, dry_run=dry_run, skip_pilot=skip_pilot)
+    if then_tree:
+        run_rejudge_then_tree(
+            limit=limit or 400,
+            tree_out=Path(argv_option_str("--tree-out") or DEFAULT_TREE_OUT),
+            max_seeds=argv_option_int("--max-seeds", 0) or 0,
+            levels=argv_option_int("--levels", DEFAULT_TURNS) or DEFAULT_TURNS,
+            fresh=not resume,
+            resume=resume,
+            skip_pilot=skip_pilot,
+            dry_run=dry_run,
+            no_web=argv_has("--no-web", "--no_web"),
+            pilot=pilot,
+        )
+        return
     if limit:
         question_items = question_items[:limit]
     pending = [
@@ -365,11 +576,14 @@ def main():
     print(f"Judge model: {active_judge_model()}")
     if web_verify.web_flag_disabled():
         print("Seed evidence: LLM-only (--no-web / CASCADE_WEB=0). Not the HalluHard paper path.")
+    elif web_verify.fetch_flag_disabled():
+        print("Seed evidence: gpt-5-mini-medium thinking + Serper snippets (CASCADE_WEB_FETCH=0)")
     else:
         print(
-            "Seed evidence: gpt-5-mini-medium thinking + Serper "
-            "(HalluHard --type serper / webscraper defaults)"
+            "Seed evidence: gpt-5-mini-medium thinking + Serper search + page/PDF fetch "
+            "(HalluHard --type webscraper)"
         )
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     print(f"Thinking: {'on' if ENABLE_THINKING else 'off'}")
     print(f"Prompt pack: v{prompt_pack_version()} ids={prompt_ids()}")
     print("Workflow: debug prompts on ~10 examples (--pilot), then scale.")
@@ -396,7 +610,21 @@ def main():
         return
     web_verify.require_serper_unless_disabled(dry_run=dry_run)
     if rejudge:
-        rejudge_existing(question_items, pilot)
+        pool = rejudge_existing(
+            question_items if pilot else None,
+            pilot,
+            limit=None if pilot else (limit or None),
+            resume=resume,
+        )
+        halls = write_rejudge_pool(pool)
+        print(f"Tree pool: {len(halls)} hallucinating / {len(pool)} rejudged -> {REJUDGE_POOL_PATH}")
+        print(
+            f"\nNext: python forecasting/pipeline.py scale --limit {limit or 400} "
+            f"--skip-pilot --resume"
+            f"\n  (rejudge already done; scale --resume skips current webscraper rows and grows the tree)"
+            f"\nOr tree only: python forecasting/pipeline.py tree --fresh --skip-pilot "
+            f"--seeds {REJUDGE_POOL_PATH} --out {DEFAULT_TREE_OUT} --max-seeds {len(halls) or 1} --levels 2"
+        )
         return
     if not pending:
         print("Nothing to do.")
@@ -486,10 +714,8 @@ def main():
         )
     else:
         print(
-            f"\nNext: python forecasting/pipeline.py tree --pilot --fresh "
-            f"--seeds {SEEDS_PATH} --out forecasting/cascade_tree_pilot.jsonl --levels 2"
-            "\nThen scale: python forecasting/pipeline.py tree --seeds "
-            f"{SEEDS_PATH} --max-seeds 100 --levels 2 --resume"
+            f"\nNext: python forecasting/pipeline.py scale --limit 400 --skip-pilot"
+            "\n  rejudges 400 saved answers, then grows the D/N/V tree on those halls"
         )
 
 

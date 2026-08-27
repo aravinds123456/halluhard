@@ -2,6 +2,7 @@
 
   python forecasting/generate_seeds.py --pilot
   python forecasting/pipeline.py tree --pilot --fresh --seeds forecasting/seeds_gpt-oss-20b.jsonl --out forecasting/cascade_tree_pilot.jsonl --levels 2
+  python forecasting/pipeline.py scale --limit 400 --skip-pilot
   python forecasting/pipeline.py tree --max-seeds 100 --levels 2 --resume
   python forecasting/pipeline.py report --from-partial
   python forecasting/pipeline.py tree --dry-run --max-seeds 2
@@ -22,7 +23,7 @@ if str(DIR) not in sys.path:
 
 # Printed at the start of every tree run. If this string is missing from stdout,
 # the file on disk is still an old pipeline.py (merge did not land).
-TREE_RUNNER = "hall-only-v5"
+TREE_RUNNER = "hall-only-v7"
 
 from cascade import (
     BATCH,
@@ -404,7 +405,7 @@ def _write_skipped_branch(
 def cmd_tree(args) -> None:
     """Step C: full 3-ary D/N/V tree. Level 1 = 3 prompts, level 2 = 9 more (3^2+3)."""
     print(
-        f"Tree runner {TREE_RUNNER}: Serper-verified seed claims, content_filter skip, "
+        f"Tree runner {TREE_RUNNER}: webscraper-verified seed claims, content_filter skip, "
         "safe resume, --fresh. If you do not see this line, pipeline.py was not updated."
     )
     if getattr(args, "fresh", False) and getattr(args, "resume", False):
@@ -431,11 +432,17 @@ def cmd_tree(args) -> None:
         os.environ["CASCADE_WEB"] = "0"
     web_verify.require_serper_unless_disabled(dry_run=args.dry_run)
     if args.dry_run:
-        print("Seed claims: dry-run stub (Serper not called)")
+        print("Seed claims: dry-run stub (webscraper not called)")
     elif web_verify.web_flag_disabled():
         print("Seed claims: LLM extract (--no-web). Not the HalluHard paper path.")
+    elif web_verify.fetch_flag_disabled():
+        print("Seed claims: gpt-5-mini-medium thinking + Serper snippets (CASCADE_WEB_FETCH=0)")
     else:
-        print("Seed claims: gpt-5-mini-medium thinking + Serper (HalluHard serper/webscraper)")
+        print(
+            "Seed claims: gpt-5-mini-medium thinking + Serper search + page/PDF fetch "
+            "(HalluHard --type webscraper)"
+        )
+        print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     cats = _resolve_categories(args.categories)
     raw_seeds = [
         r for r in rows(Path(args.seeds))
@@ -736,6 +743,24 @@ def cmd_label(args) -> None:
     cmd_report(args)
 
 
+def cmd_scale(args) -> None:
+    """Rejudge N saved seed rows, then immediately grow the D/N/V tree on those halls."""
+    import generate_seeds
+
+    generate_seeds.run_rejudge_then_tree(
+        limit=args.limit,
+        tree_out=Path(args.out),
+        max_seeds=args.max_seeds,
+        levels=args.levels,
+        fresh=not args.resume,
+        resume=args.resume,
+        skip_pilot=args.skip_pilot,
+        dry_run=args.dry_run,
+        no_web=args.no_web,
+        pilot=args.pilot,
+    )
+
+
 def cmd_seeds(_args) -> None:
     """Generate per-model hallucinating seeds (HallucinationResearchTest sampler)."""
     import generate_seeds
@@ -786,6 +811,27 @@ def main() -> None:
         action="store_true",
         help="LLM-only seed claims (not the paper path). Default is Serper web evidence.",
     )
+    scale = sub.add_parser(
+        "scale",
+        help="rejudge N saved seeds, then immediately grow the D/N/V tree on those halls",
+    )
+    scale.add_argument("--limit", type=int, default=400, help="saved seed rows to rejudge (not question-bank ids)")
+    scale.add_argument("--out", default=str(DIR / "cascade_tree_dnv.jsonl"))
+    scale.add_argument(
+        "--max-seeds",
+        type=int,
+        default=0,
+        help="tree cap; 0 = all hallucinating rows from the rejudge pool",
+    )
+    scale.add_argument("--levels", type=int, default=DEFAULT_TURNS)
+    scale.add_argument(
+        "--skip-pilot",
+        action="store_true",
+        help="allow >10 seeds without a recorded 10-example prompt debug",
+    )
+    scale.add_argument("--dry-run", action="store_true", help="no judge/Azure calls; stub the tree on current labels")
+    scale.add_argument("--no-web", action="store_true")
+    scale.add_argument("--pilot", action="store_true", help="rejudge the 10-example slice, then tree those halls")
     label = sub.add_parser("label", help="label branch outcomes")
     label.add_argument("--tree", default=str(TREE))
     label.add_argument("--llm-label", action="store_true", help="ask the judge model instead of deriving")
@@ -797,7 +843,7 @@ def main() -> None:
     report.add_argument("--pdf", default=str(DIR / "results" / "cascade_report.pdf"))
     for name in ("answer", "judge"):
         sub.choices[name].add_argument("--domain", choices=[*DOMAINS, "all"], default="all")
-    for name in ("answer", "judge", "tree", "label"):
+    for name in ("answer", "judge", "tree", "label", "scale"):
         sub.choices[name].add_argument("--resume", action="store_true")
     for name in ("answer", "tree"):
         sub.choices[name].add_argument("--model", default=QWEN)
