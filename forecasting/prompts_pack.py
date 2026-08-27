@@ -53,7 +53,8 @@ def prompt_ids() -> dict[str, str]:
 
 
 def prompt_text(name: str) -> str:
-    return load_pack()["prompts"][name]["text"]
+    prompt = load_pack()["prompts"][name]
+    return prompt.get("template") or prompt["text"]
 
 
 def fill_prompt(name: str, **kwargs) -> str:
