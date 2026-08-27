@@ -1,6 +1,14 @@
 # HalluHard
 
-**Cascade code and JSON are in [`forecasting/`](forecasting/)** — seeds, D/N/V trees, and `forecasting/results/` (including `rejudge_pool.jsonl`). Open that folder; it is not a separate GitHub page.
+**Cascade JSON on this `main` checkout** (open these files; GitHub will not inline-preview the large `.jsonl`s — use **Raw** / **Download**):
+
+| File | What it is |
+|---|---|
+| [`forecasting/seeds_gpt-oss-20b.jsonl`](forecasting/seeds_gpt-oss-20b.jsonl) | GPT-OSS seed answers + current webscraper labels (**444** rows) |
+| [`forecasting/results/rejudge_pool.jsonl`](forecasting/results/rejudge_pool.jsonl) | First **400** of those rows after the latest rejudge |
+| [`forecasting/cascade_tree_dnv.jsonl`](forecasting/cascade_tree_dnv.jsonl) | D/N/V tree grown from hallucinating rows in that pool |
+
+Folder: [`forecasting/`](forecasting/). This is not a separate GitHub page.
 
 A hard multi-turn hallucination **benchmark** ([paper](https://arxiv.org/abs/2602.01031), [halluhard.com](https://halluhard.com/)), plus a **cascade experiment** in this checkout that reuses the same questions.
 
