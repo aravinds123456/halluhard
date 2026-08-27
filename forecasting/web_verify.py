@@ -42,7 +42,7 @@ SEARCH_CHARS = 300
 MAX_URLS_TO_FETCH = 2
 MAX_PDFS_TO_FETCH = 1
 MAX_FILTER_WORDS = 1500
-MAX_EVIDENCE_CHARS = 8000
+MAX_EVIDENCE_CHARS = 50000
 MIN_PAGE_CHARS = 100
 _PDF_HREF = re.compile(r"""href\s*=\s*["']([^"']+\.pdf[^"']*)["']""", re.I)
 _FETCH_HEADERS = {
@@ -506,8 +506,8 @@ def extract_candidates(question: str, answer: str, gpt_fn: GptFn, max_claims: in
             gpt_fn,
             fill_prompt(
                 "claim_candidates",
-                question=question[:1500],
-                answer=answer[:4000],
+                question=question,
+                answer=answer,
                 max_claims=str(max_claims),
             ),
             role="aux",
@@ -539,9 +539,9 @@ def judge_claim_against_evidence(claim: str, evidence: str, gpt_fn: GptFn) -> di
             gpt_fn,
             fill_prompt(
                 "web_claim_judge",
-                claim=claim[:800],
-                evidence=(evidence or "No search results found.")[:MAX_EVIDENCE_CHARS],
-                snippets=(evidence or "No search results found.")[:MAX_EVIDENCE_CHARS],
+                claim=claim,
+                evidence=(evidence or "No search results found."),
+                snippets=(evidence or "No search results found."),
             ),
             role="judge",
         )
@@ -558,6 +558,32 @@ def judge_claim_against_evidence(claim: str, evidence: str, gpt_fn: GptFn) -> di
 def judge_claim_against_snippets(claim: str, snippets: str, gpt_fn: GptFn) -> dict:
     """Back-compat wrapper; the judge now reads fetched pages when present."""
     return judge_claim_against_evidence(claim, snippets, gpt_fn)
+
+
+def confirm_false_claim(claim: str, verdict: str, reason: str, evidence: str, gpt_fn: GptFn) -> dict:
+    """Second-pass gate: contradicted/fabricated is not VERIFIED_FALSE until confirmed."""
+    payload = _as_dict(
+        invoke_gpt(
+            gpt_fn,
+            fill_prompt(
+                "false_confirm",
+                claim=claim,
+                verdict=verdict,
+                reason=reason,
+                evidence=evidence or "No search results found.",
+            ),
+            role="judge",
+        )
+    )
+    raw = payload.get("actually_false")
+    if isinstance(raw, bool):
+        actually_false = raw
+    else:
+        actually_false = str(raw or "").strip().lower() in {"true", "yes", "1"}
+    return {
+        "actually_false": actually_false,
+        "reason": str(payload.get("reason") or "").strip(),
+    }
 
 
 def pick_false_claim(claim_rows: list[dict]) -> dict | None:
@@ -679,8 +705,8 @@ def verify_seed_answer(
                 "claim": claim_text,
                 "entities": candidate.get("entities") or [],
                 "query": query,
-                "snippets": (snippets or "")[:4000],
-                "pages_text": (pages_text or "")[:4000],
+                "snippets": (snippets or "")[:MAX_EVIDENCE_CHARS],
+                "pages_text": (pages_text or "")[:MAX_EVIDENCE_CHARS],
                 "pages": pages,
                 "fetched_pages": len(pages or []),
                 "filtered": filtered,
@@ -692,17 +718,45 @@ def verify_seed_answer(
             }
         )
     chosen = pick_false_claim(claim_rows)
+    confirmation = None
+    if chosen:
+        evidence_for_confirm = format_evidence(
+            chosen.get("pages_text") or "", chosen.get("snippets") or ""
+        )
+        confirmation = confirm_false_claim(
+            chosen["claim"],
+            chosen.get("verdict") or "",
+            chosen.get("reason") or "",
+            evidence_for_confirm,
+            gpt_fn,
+        )
+        if not confirmation.get("actually_false"):
+            chosen = None
     hallucinating = chosen is not None
     if hallucinating:
         reason = f"{chosen['verdict']}: {chosen.get('reason') or chosen['claim']}"
         false_claim = chosen["claim"]
         entities = chosen.get("entities") or []
+        seed_status = "VERIFIED_FALSE"
     elif not claim_rows:
         reason = "no checkable particular to verify"
         false_claim = ""
         entities = []
+        seed_status = "INSUFFICIENT"
     else:
-        reason = "web evidence did not contradict or show fabrication for extracted particulars"
+        verdicts = {str(row.get("verdict") or "") for row in claim_rows}
+        if confirmation and confirmation.get("actually_false") is False:
+            reason = (
+                "false-claim confirmation rejected a first-pass "
+                f"{confirmation.get('reason') or 'true or under-evidenced particular'}"
+            )
+            seed_status = "INSUFFICIENT"
+        elif "supported" in verdicts and not (verdicts & set(FALSE_VERDICTS)):
+            reason = "web evidence did not contradict or show fabrication for extracted particulars"
+            seed_status = "SUPPORTED"
+        else:
+            reason = "web evidence did not contradict or show fabrication for extracted particulars"
+            seed_status = "INSUFFICIENT"
         false_claim = ""
         entities = []
     used_pages = any(row.get("evidence_kind") == "pages" for row in claim_rows)
@@ -712,9 +766,12 @@ def verify_seed_answer(
         "evidence_kind": "pages" if used_pages else "snippets",
         "judge": f"gpt-5-mini-{DEFAULT_JUDGE_REASONING_EFFORT}",
         "hallucinating": hallucinating,
+        "seed_status": seed_status,
         "false_claim": false_claim,
         "entities": entities,
         "reason": reason,
+        "confirmation": confirmation,
+        "confirmed_verdict": (chosen or {}).get("verdict") or "",
         "fetch_backend": describe_fetch_backend(),
         "claims": claim_rows,
         "fetch_errors": n_fetch_errors,

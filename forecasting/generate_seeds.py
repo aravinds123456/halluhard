@@ -222,8 +222,13 @@ def apply_seed_judgement(
         updated["web_false_claim"] = web_verification.get("false_claim") or ""
         updated["entities"] = web_verification.get("entities") or updated.get("entities") or []
         updated["judge_method"] = web_verification.get("method") or "webscraper"
+        updated["seed_status"] = web_verification.get("seed_status") or (
+            "VERIFIED_FALSE" if web_verification.get("hallucinating") else "INSUFFICIENT"
+        )
     else:
         updated["judge_method"] = updated.get("judge_method") or "llm"
+        if "seed_status" not in updated:
+            updated["seed_status"] = "NOT_VERIFIED"
     return updated
 
 
@@ -255,15 +260,21 @@ def rejudge_target_indexes(
     return indexes
 
 
-def write_rejudge_pool(records: list[dict], path: Path | None = None) -> list[dict]:
-    """Write the rejudged rows the tree should branch from. Halls are filtered later."""
+def write_rejudge_pool(records: list[dict], path: Path | None = None, *, dry_run: bool = False) -> list[dict]:
+    """Write rejudged rows. Return tree-eligible halls (VERIFIED_FALSE, or Hallucinating in dry-run)."""
     path = Path(path or REJUDGE_POOL_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
-    halls = [
-        record
-        for record in records
-        if judged_seed(record) and hallucinating(record) and not record.get("duplicate_answer")
-    ]
+    from grounding import tree_eligible_record
+
+    halls = []
+    for record in records:
+        if record.get("duplicate_answer"):
+            continue
+        if dry_run:
+            if judged_seed(record) and hallucinating(record):
+                halls.append(record)
+        elif tree_eligible_record(record):
+            halls.append(record)
     path.write_text(
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
         encoding="utf-8",
@@ -369,9 +380,11 @@ def judge_seed(question: str, answer: str, *, use_web: bool | None = None):
         use_web = web_verify.web_requested()
     if use_web:
         web_verify.require_serper_unless_disabled()
-        result = web_verify.verify_seed_answer(question, answer, gpt)
-        label = "Hallucinating" if result["hallucinating"] else "Not Hallucinating"
-        return label, result.get("reason") or "", json.dumps(result, ensure_ascii=False), result
+        from grounding import WebscraperGroundingBackend
+        verified = WebscraperGroundingBackend(gpt).verify(question, answer)
+        result = verified.evidence
+        label = "Hallucinating" if verified.tree_eligible() else "Not Hallucinating"
+        return label, verified.reason or "", json.dumps(result, ensure_ascii=False), result
     prompt = fill_prompt("seed_judge", question=question, answer=answer)
     if judge_backend() == "gemini":
         raw_text = call_gemini(prompt)
@@ -479,7 +492,7 @@ def run_rejudge_then_tree(
         row_limit = limit
     print(
         f"Scale: rejudge {('pilot 10 questions' if pilot else f'{limit} saved seed rows')}"
-        f", then branch the hallucinating ones"
+        f", then branch the VERIFIED_FALSE ones"
         f"{' (DRY_RUN: current labels, no judge API)' if dry_run else ''}."
     )
     if dry_run:
@@ -493,12 +506,13 @@ def run_rejudge_then_tree(
         print(f"DRY_RUN=1: would rejudge {len(pool)} rows in {SEEDS_PATH.name}; using current labels for the tree stub.")
     else:
         pool = rejudge_existing(question_items, pilot, limit=row_limit, resume=resume)
-    halls = write_rejudge_pool(pool)
-    print(f"Tree pool: {len(halls)} hallucinating / {len(pool)} rejudged -> {REJUDGE_POOL_PATH}")
-    if not halls:
+    halls = write_rejudge_pool(pool, dry_run=dry_run)
+    print(f"Tree pool: {len(halls)} VERIFIED_FALSE / {len(pool)} rejudged -> {REJUDGE_POOL_PATH}")
+    if not halls and not dry_run:
         raise SystemExit(
-            "No hallucinating seeds in the rejudge pool, so the tree was not started. "
-            "That can be real (conservative webscraper) or a fetch failure — check fetched_pages."
+            "No VERIFIED_FALSE seeds in the rejudge pool, so the tree was not started. "
+            "A first-pass Hallucinating label is not enough. Rejudge with pack v7 confirmation, "
+            "or check fetched_pages if the webscraper failed."
         )
     tree_max = max_seeds if max_seeds and max_seeds > 0 else len(halls)
     out = Path(tree_out or DEFAULT_TREE_OUT)
@@ -617,7 +631,7 @@ def main():
             resume=resume,
         )
         halls = write_rejudge_pool(pool)
-        print(f"Tree pool: {len(halls)} hallucinating / {len(pool)} rejudged -> {REJUDGE_POOL_PATH}")
+        print(f"Tree pool: {len(halls)} VERIFIED_FALSE / {len(pool)} rejudged -> {REJUDGE_POOL_PATH}")
         print(
             f"\nNext: python forecasting/pipeline.py scale --limit {limit or 400} "
             f"--skip-pilot --resume"

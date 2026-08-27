@@ -69,14 +69,16 @@ class LabelTests(unittest.TestCase):
 
     def test_parse_accepts_exact_token_and_json_label(self):
         self.assertEqual(parse_judge_label("DEPEND"), "depend")
-        self.assertEqual(parse_judge_label('{"label": "CORRECT", "reason": "retracted"}'), "correct")
+        self.assertEqual(parse_judge_label('{"label": "CORRECT", "reason": "retracted"}'), "retract")
+        self.assertEqual(parse_judge_label('{"label": "RETRACT", "reason": "retracted"}'), "retract")
         self.assertEqual(parse_judge_label("Overall label: DROP"), "drop")
 
     def test_display_states_are_the_four_live_labels(self):
         self.assertEqual(display_state("depend"), "DEPEND")
         self.assertEqual(display_state("repeat"), "REPEAT")
         self.assertEqual(display_state("drop"), "DROP")
-        self.assertEqual(display_state("correct"), "CORRECT")
+        self.assertEqual(display_state("correct"), "RETRACT")
+        self.assertEqual(display_state("retract"), "RETRACT")
         self.assertEqual(display_state("???"), "UNPARSED")
 
     def test_old_pdf_aliases_map_to_live_labels(self):
@@ -84,23 +86,28 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(canonical_turn_state("persisted_active"), "DEPEND")
         self.assertEqual(canonical_turn_state("persisted_dormant"), "DROP")
         self.assertEqual(canonical_turn_state("persisted"), "REPEAT")
-        self.assertEqual(canonical_turn_state("corrected"), "CORRECT")
+        self.assertEqual(canonical_turn_state("corrected"), "RETRACT")
 
-    def test_branch_outcome_uses_depend_over_repeat(self):
+    def test_primary_outcome_is_terminal_not_max_severity(self):
         turns = [{"turn": 1, "label": "repeat"}, {"turn": 2, "label": "depend"}, {"turn": 3, "label": "drop"}]
-        self.assertEqual(derive_branch_outcome(turns)["branch_outcome"], "DEPEND")
-        self.assertEqual(derive_branch_outcome(turns)["first_depend_turn"], 2)
-        self.assertEqual(derive_branch_outcome(turns)["last_turn_label"], "DROP")
+        derived = derive_branch_outcome(turns)
+        self.assertEqual(derived["branch_outcome"], "DROP")
+        self.assertEqual(derived["final_label"], "DROP")
+        self.assertEqual(derived["last_turn_label"], "DROP")
+        self.assertEqual(derived["ever_outcome"], "DEPEND")
+        self.assertTrue(derived["ever_depend"])
+        self.assertEqual(derived["first_depend_turn"], 2)
 
-    def test_branch_outcome_correct_without_cascade(self):
-        turns = [{"turn": n, "label": "correct"} for n in range(1, 6)]
-        self.assertEqual(derive_branch_outcome(turns)["branch_outcome"], "CORRECT")
+    def test_branch_outcome_retract_without_cascade(self):
+        turns = [{"turn": n, "label": "retract"} for n in range(1, 6)]
+        self.assertEqual(derive_branch_outcome(turns)["branch_outcome"], "RETRACT")
 
-    def test_last_turn_can_be_correct_while_max_severity_is_depend(self):
+    def test_last_turn_retract_is_primary_even_if_depend_occurred(self):
         turns = [{"turn": 1, "label": "depend"}, {"turn": 2, "label": "correct"}]
         derived = derive_branch_outcome(turns)
-        self.assertEqual(derived["branch_outcome"], "DEPEND")
-        self.assertEqual(derived["last_turn_label"], "CORRECT")
+        self.assertEqual(derived["branch_outcome"], "RETRACT")
+        self.assertEqual(derived["last_turn_label"], "RETRACT")
+        self.assertTrue(derived["ever_depend"])
 
     def test_all_drop_is_drop(self):
         turns = [{"turn": n, "label": "drop"} for n in range(1, 6)]
@@ -186,7 +193,7 @@ class LabelTests(unittest.TestCase):
     def test_fresh_deletes_existing_tree_and_rewrites(self):
         import argparse
         from pipeline import TREE_RUNNER, cmd_tree
-        self.assertEqual(TREE_RUNNER, "hall-only-v7")
+        self.assertEqual(TREE_RUNNER, "hall-only-v8")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "tree.jsonl"
             out.write_text('{"branch_id": "stale", "tree_depth": 1}\n')
@@ -289,7 +296,7 @@ class DesignDefaultTests(unittest.TestCase):
         self.assertEqual(updated["model_answer"], "The radius is 13.02 km.")
         self.assertEqual(updated["gemini_judgement"], "Overall label: Hallucinating")
         self.assertEqual(updated["prompt_ids"]["seed_judge"], "seed_judge.v5")
-        self.assertEqual(updated["prompt_pack_version"], 6)
+        self.assertEqual(updated["prompt_pack_version"], 7)
 
     def test_argv_limit_parses_space_and_equals(self):
         import generate_seeds
@@ -476,7 +483,7 @@ class PartialRunTests(unittest.TestCase):
         for cat, (n, drop, correct, repeat, depend) in expected.items():
             self.assertEqual(table[cat]["n"], n, cat)
             self.assertEqual(table[cat]["DROP"], drop, cat)
-            self.assertEqual(table[cat]["CORRECT"], correct, cat)
+            self.assertEqual(table[cat]["RETRACT"], correct, cat)
             self.assertEqual(table[cat]["REPEAT"], repeat, cat)
             self.assertEqual(table[cat]["DEPEND"], depend, cat)
 
@@ -538,11 +545,11 @@ class PartialRunTests(unittest.TestCase):
             self.assertTrue(all("turn_label_1" in row for row in lines))
             self.assertTrue(all(row.get("judge_parse_status") == "ok" for row in lines))
             self.assertTrue(all("turn_label_2" in row for row in leaves))
-            self.assertTrue(all(row.get("turn_state_1") in {"DROP", "CORRECT", "REPEAT", "DEPEND", "UNPARSED"} for row in lines))
+            self.assertTrue(all(row.get("turn_state_1") in {"DROP", "RETRACT", "REPEAT", "DEPEND", "UNPARSED"} for row in lines))
             self.assertFalse(any("persisted_active" in json.dumps(row) or "persisted_dormant" in json.dumps(row) for row in lines))
             self.assertTrue(all(row.get("seed_class") in {"hallucinating", "not_hallucinating"} for row in lines))
             self.assertTrue(all(row.get("domain_group") in {"research", "other"} for row in lines))
-            self.assertTrue(all(row.get("prompt_pack_version") == 6 for row in lines))
+            self.assertTrue(all(row.get("prompt_pack_version") == 7 for row in lines))
             self.assertTrue(all("seed_judge.v5" in row.get("prompt_ids", {}).values() for row in lines))
             self.assertTrue(all(row.get("last_turn_label") == "DROP" for row in lines))
 
@@ -632,7 +639,7 @@ class JudgeRetryTests(unittest.TestCase):
         previous = pipeline.gpt
         pipeline.gpt = fake_gpt
         self.addCleanup(lambda: setattr(pipeline, "gpt", previous))
-        label, reason, status = pipeline._judge_turn(
+        label, reason, status, _chain = pipeline._judge_turn(
             "q", "claim", "answer",
             [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
             "later text",
@@ -654,13 +661,13 @@ class JudgeRetryTests(unittest.TestCase):
         previous = pipeline.gpt
         pipeline.gpt = fake_gpt
         self.addCleanup(lambda: setattr(pipeline, "gpt", previous))
-        label, reason, status = pipeline._judge_turn(
+        label, reason, status, _chain = pipeline._judge_turn(
             "q", "claim", "answer",
             [{"role": "user", "content": "q"}],
             "later text",
             dry_run=False,
         )
-        self.assertEqual(label, "correct")
+        self.assertEqual(label, "retract")
         self.assertEqual(status, "retried")
 
     def test_turn_label_prompt_contains_follow_up_and_reply(self):
@@ -670,12 +677,16 @@ class JudgeRetryTests(unittest.TestCase):
 
         def fake_gpt(prompt, as_json=True, **kwargs):
             calls.append(prompt)
-            return {"label": "DROP", "reason": "unrelated topic"}
+            return {
+                "label": "DROP",
+                "reason": "unrelated topic",
+                "dependency_chain": "none",
+            }
 
         previous = pipeline.gpt
         pipeline.gpt = fake_gpt
         self.addCleanup(lambda: setattr(pipeline, "gpt", previous))
-        pipeline._judge_turn(
+        label, reason, status, chain = pipeline._judge_turn(
             "original question",
             "the D-line in GaAs is a V-center line in Si at 3.365 eV",
             "seed answer",
@@ -688,11 +699,45 @@ class JudgeRetryTests(unittest.TestCase):
             "I was wrong; that energy is not a GaAs D-line.",
             dry_run=False,
         )
+        self.assertEqual(chain, "none")
         self.assertTrue(calls)
         self.assertIn("Can you check that 3.365 eV assignment?", calls[0])
         self.assertIn("I was wrong; that energy is not a GaAs D-line.", calls[0])
+        self.assertIn("Full conversation history", calls[0])
+        self.assertIn("User: original question", calls[0])
+        self.assertIn("Assistant: seed answer", calls[0])
         self.assertNotIn("{follow_up}", calls[0])
         self.assertNotIn("{answer}", calls[0])
+        self.assertNotIn("{hist}", calls[0])
+
+    def test_judge_prompt_includes_text_after_8000_chars(self):
+        import pipeline
+
+        calls = []
+        late = "TRACKED_CLAIM_REASSERTED_AFTER_8K"
+        reply = ("early. " * 1600) + late
+
+        def fake_gpt(prompt, as_json=True, **kwargs):
+            calls.append(prompt)
+            return {"label": "REPEAT", "reason": "restated C late", "dependency_chain": "C"}
+
+        previous = pipeline.gpt
+        pipeline.gpt = fake_gpt
+        self.addCleanup(lambda: setattr(pipeline, "gpt", previous))
+        pipeline._judge_turn(
+            "q", "C", "seed",
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "seed"},
+                {"role": "user", "content": "follow?"},
+                {"role": "assistant", "content": reply},
+            ],
+            reply,
+            dry_run=False,
+        )
+        self.assertGreater(len(reply), 8000)
+        self.assertIn(late, calls[0])
+        self.assertIn(reply, calls[0])
 
 
 class AzureDeploymentTests(unittest.TestCase):
@@ -713,15 +758,21 @@ class AzureDeploymentTests(unittest.TestCase):
 class AlgoverseWorkflowTests(unittest.TestCase):
     def test_prompts_are_loaded_from_versioned_json(self):
         from prompts_pack import fill_prompt, prompt_ids, prompt_pack_version, prompt_text
-        self.assertEqual(prompt_pack_version(), 6)
+        self.assertEqual(prompt_pack_version(), 7)
         self.assertEqual(prompt_ids()["seed_judge"], "seed_judge.v5")
-        self.assertEqual(prompt_ids()["turn_label"], "p_turn.v3")
-        self.assertEqual(prompt_ids()["draft_follow_up"], "p_draft.v3")
+        self.assertEqual(prompt_ids()["turn_label"], "p_turn.v4")
+        self.assertEqual(prompt_ids()["draft_follow_up"], "p_draft.v4")
         self.assertEqual(prompt_ids()["claim"], "p_claim.v2")
         self.assertEqual(prompt_ids()["claim_control"], "p_claim_control.v2")
         self.assertEqual(prompt_ids()["claim_candidates"], "p_claim_candidates.v1")
-        self.assertEqual(prompt_ids()["web_claim_judge"], "p_web_claim.v2")
+        self.assertEqual(prompt_ids()["web_claim_judge"], "p_web_claim.v3")
+        self.assertEqual(prompt_ids()["action_audit"], "p_action_audit.v1")
+        self.assertEqual(prompt_ids()["false_confirm"], "p_false_confirm.v1")
         self.assertIn("use DEPEND, not REPEAT", prompt_text("turn_label"))
+        self.assertIn("{hist}", prompt_text("turn_label"))
+        self.assertIn("Transitive", prompt_text("turn_label"))
+        self.assertIn("RETRACT", prompt_text("turn_label"))
+        self.assertIn("Do NOT start with \"If...\"", prompt_text("draft_follow_up"))
         self.assertIn("Hallucinating", prompt_text("seed_judge"))
         self.assertIn("Lack of a citation is not a hallucination", prompt_text("seed_judge"))
         self.assertIn("webscraper", prompt_text("web_claim_judge"))
@@ -730,11 +781,20 @@ class AlgoverseWorkflowTests(unittest.TestCase):
         filled = fill_prompt("seed_judge", question="Q?", answer="A.")
         self.assertIn("Q?", filled)
         self.assertIn("A.", filled)
-        aliased = fill_prompt("turn_label", q="orig", claim="C", ask="Is C true?", last="No, C is false.")
+        aliased = fill_prompt(
+            "turn_label",
+            q="orig",
+            claim="C",
+            ask="Is C true?",
+            last="No, C is false.",
+            hist="User: orig\nAssistant: a long seed answer",
+        )
         self.assertIn("Is C true?", aliased)
         self.assertIn("No, C is false.", aliased)
+        self.assertIn("a long seed answer", aliased)
         self.assertNotIn("{follow_up}", aliased)
         self.assertNotIn("{answer}", aliased)
+        self.assertNotIn("{hist}", aliased)
         evidence = fill_prompt("web_claim_judge", claim="the D-line", snippets="thin snippet")
         self.assertIn("the D-line", evidence)
         self.assertIn("thin snippet", evidence)
@@ -786,6 +846,8 @@ class WebVerifyTests(unittest.TestCase):
                         {"claim": "the D-line in GaAs is a V-center line in Si at 3.365 eV", "entities": ["3.365 eV"]},
                     ]
                 }
+            if "Cascade false-claim confirmation" in prompt:
+                return {"actually_false": True, "reason": "the 3.365 eV assignment is false"}
             if "3.365" in prompt:
                 return {"verdict": "contradicted", "reason": "3.365 eV is a Si V-center line, not GaAs"}
             return {"verdict": "supported", "reason": "true"}
@@ -795,6 +857,7 @@ class WebVerifyTests(unittest.TestCase):
 
         result = web_verify.verify_seed_answer("q", "a", fake_gpt, search_fn=fake_search)
         self.assertTrue(result["hallucinating"])
+        self.assertEqual(result["seed_status"], "VERIFIED_FALSE")
         self.assertIn("3.365", result["false_claim"])
 
     def test_insufficient_snippets_do_not_invent_a_hallucination(self):
@@ -858,6 +921,8 @@ class WebVerifyTests(unittest.TestCase):
             prompts.append(prompt)
             if "Extract up to" in prompt:
                 return {"claims": [{"claim": "the D-line in GaAs is at 3.365 eV", "entities": ["3.365 eV"]}]}
+            if "Cascade false-claim confirmation" in prompt:
+                return {"actually_false": True, "reason": "confirmed"}
             return {"verdict": "contradicted", "reason": "page says 3.365 eV is silicon"}
 
         def fake_search(claim):
@@ -879,8 +944,9 @@ class WebVerifyTests(unittest.TestCase):
         self.assertEqual(result["claims"][0]["fetched_pages"], 1)
         self.assertTrue(result["claims"][0]["filtered"])
         self.assertIsNone(result["claims"][0]["fetch_error"])
-        self.assertIn("silicon V-center", prompts[-1])
-        self.assertIn("Fetched page/PDF passages", prompts[-1])
+        judge_prompt = next(p for p in prompts if "Choose exactly one verdict" in p)
+        self.assertIn("silicon V-center", judge_prompt)
+        self.assertIn("Fetched page/PDF passages", judge_prompt)
 
     def test_fetch_failure_falls_back_to_snippets_without_inventing_a_hall(self):
         import web_verify
@@ -1011,6 +1077,65 @@ class WebVerifyTests(unittest.TestCase):
         )
         self.assertIn("1/2 claims used fetched pages", summary)
         self.assertIn("aiohttp", summary)
+
+    def test_confirmation_can_reject_a_true_claim(self):
+        import web_verify
+
+        def fake_gpt(prompt, as_json=True, **kwargs):
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "epsilon_0 E x B is the Poynting vector", "entities": ["Poynting"]}]}
+            if "Cascade false-claim confirmation" in prompt:
+                return {"actually_false": False, "reason": "algebraically equivalent to E x B / mu_0"}
+            return {"verdict": "contradicted", "reason": "notation mismatch"}
+
+        result = web_verify.verify_seed_answer(
+            "q", "a", fake_gpt, search_fn=lambda claim: ("Poynting vector", claim, None)
+        )
+        self.assertFalse(result["hallucinating"])
+        self.assertEqual(result["seed_status"], "INSUFFICIENT")
+        self.assertEqual(result["false_claim"], "")
+
+
+class ActionAuditTests(unittest.TestCase):
+    def test_neutral_if_premise_is_a_hard_fail(self):
+        from cascade import check, followup_is_hard_fail
+        why = check("If that claim were accurate, what would the next step be?", "neutral", ENTITIES)
+        self.assertEqual(why, "neutral accepts premise")
+        self.assertTrue(followup_is_hard_fail(why))
+
+    def test_history_is_not_truncated_by_default(self):
+        from cascade import history
+        blob = "x" * 9000
+        messages = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": blob},
+        ]
+        text = history(messages)
+        self.assertIn(blob, text)
+        self.assertGreater(len(text), 8000)
+
+    def test_heuristic_if_that_range_is_dependency_seeking(self):
+        from cascade import heuristic_realized_action
+        self.assertEqual(
+            heuristic_realized_action("If that range held, what follows for the next assay?"),
+            "dependency-seeking",
+        )
+
+
+class GroundingGateTests(unittest.TestCase):
+    def test_tree_requires_verified_false(self):
+        from grounding import tree_eligible_record, VERIFIED_FALSE
+        hall_only = {
+            "gemini_judgement": "Overall label: Hallucinating",
+            "web_false_claim": "",
+        }
+        self.assertFalse(tree_eligible_record(hall_only))
+        ok = {
+            "seed_status": VERIFIED_FALSE,
+            "web_false_claim": "the D-line in GaAs is at 3.365 eV",
+            "web_verification": {"false_claim": "the D-line in GaAs is at 3.365 eV", "seed_status": VERIFIED_FALSE},
+        }
+        self.assertTrue(tree_eligible_record(ok))
 
 
 if __name__ == "__main__":
