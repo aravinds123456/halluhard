@@ -278,6 +278,7 @@ class DesignDefaultTests(unittest.TestCase):
             },
         ]
         self.assertEqual(rejudge_target_indexes(records, {0, 2}), [0])
+        self.assertEqual(rejudge_target_indexes(records, None, limit=2), [0, 2])
         updated = apply_seed_judgement(
             records[0],
             "Hallucinating",
@@ -289,6 +290,69 @@ class DesignDefaultTests(unittest.TestCase):
         self.assertEqual(updated["gemini_judgement"], "Overall label: Hallucinating")
         self.assertEqual(updated["prompt_ids"]["seed_judge"], "seed_judge.v5")
         self.assertEqual(updated["prompt_pack_version"], 6)
+
+    def test_argv_limit_parses_space_and_equals(self):
+        import generate_seeds
+
+        previous = sys.argv
+        self.addCleanup(lambda: setattr(sys, "argv", previous))
+        sys.argv = ["generate_seeds.py", "--rejudge", "--limit", "400"]
+        self.assertEqual(generate_seeds.argv_option_int("--limit"), 400)
+        sys.argv = ["generate_seeds.py", "--limit=12", "--tree"]
+        self.assertEqual(generate_seeds.argv_option_int("--limit"), 12)
+        sys.argv = ["generate_seeds.py"]
+        self.assertIsNone(generate_seeds.argv_option_int("--limit"))
+
+    def test_scale_dry_run_rejudges_limit_then_trees_those_halls(self):
+        import generate_seeds
+
+        previous_seeds = generate_seeds.SEEDS_PATH
+        previous_pool = generate_seeds.REJUDGE_POOL_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            seeds = Path(tmp) / "seeds.jsonl"
+            pool = Path(tmp) / "pool.jsonl"
+            out = Path(tmp) / "tree.jsonl"
+            rows = []
+            for i, domain in enumerate(("research", "legal", "medical", "research")):
+                qid = i if domain == "research" else (100000 + i if domain == "legal" else 200000 + i)
+                hall = i < 3
+                rows.append(
+                    {
+                        "seed_schema_version": 3,
+                        "question_number": qid,
+                        "sample_index": 0,
+                        "domain": domain,
+                        "question": f"Question {i}?",
+                        "model_answer": f"Answer {i} with a false particular.",
+                        "qwen_answer": f"Answer {i} with a false particular.",
+                        "model_name": "gpt-oss-20b",
+                        "gemini_judgement": (
+                            "Overall label: Hallucinating" if hall else "Overall label: Not Hallucinating"
+                        ),
+                        "duplicate_answer": False,
+                    }
+                )
+            seeds.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            generate_seeds.SEEDS_PATH = seeds
+            generate_seeds.REJUDGE_POOL_PATH = pool
+            self.addCleanup(lambda: setattr(generate_seeds, "SEEDS_PATH", previous_seeds))
+            self.addCleanup(lambda: setattr(generate_seeds, "REJUDGE_POOL_PATH", previous_pool))
+            generate_seeds.run_rejudge_then_tree(
+                limit=3,
+                tree_out=out,
+                max_seeds=0,
+                levels=2,
+                fresh=True,
+                resume=False,
+                skip_pilot=True,
+                dry_run=True,
+                no_web=True,
+            )
+            pool_rows = [json.loads(line) for line in pool.read_text().splitlines() if line.strip()]
+            self.assertEqual(len(pool_rows), 3)
+            self.assertTrue(all(row["gemini_judgement"].startswith("Overall label: Hallucinating") for row in pool_rows))
+            tree_rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            self.assertEqual(len(tree_rows), 36)
 
 
 class SamplingTests(unittest.TestCase):

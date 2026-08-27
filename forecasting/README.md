@@ -90,20 +90,21 @@ python forecasting/pipeline.py tree \
   --out forecasting/cascade_tree_pilot.jsonl \
   --levels 2
 
-# 3) Scale only after those 10-example runs look right (same prompt pack)
-python forecasting/generate_seeds.py
-python forecasting/pipeline.py tree \
-  --seeds forecasting/seeds_gpt-oss-20b.jsonl \
-  --out forecasting/cascade_tree_dnv.jsonl \
-  --max-seeds 100 \
-  --levels 2 \
-  --resume
+# 3) Scale: rejudge 400 saved answers, then immediately grow the D/N/V tree
+#    on the hallucinating ones from that pool (not a 100-seed subsample of the
+#    whole file). --skip-pilot only if you already finished the 10-example debug
+#    on this prompt pack. If the tree crashes, rerun with --resume (skips rows
+#    that already have current webscraper labels).
+python forecasting/pipeline.py scale --limit 400 --skip-pilot
+
+# Same thing as two flags on generate_seeds:
+# python forecasting/generate_seeds.py --rejudge --limit 400 --tree --skip-pilot
 
 # 4) Tables include DROP/CORRECT/REPEAT/DEPEND, incomplete seeds, Wilson CIs
 python forecasting/pipeline.py report --tree forecasting/cascade_tree_dnv.jsonl
 ```
 
-A 100-seed tree without `forecasting/results/pilot.json` from step 2 exits with the lecture warning. Prompts are `forecasting/prompts/pack.json`; every row stores `prompt_pack_version` and `prompt_ids`.
+A 400-row rejudge+tree without `forecasting/results/pilot.json` from steps 1–2 exits with the lecture warning unless you pass `--skip-pilot`. Prompts are `forecasting/prompts/pack.json`; every row stores `prompt_pack_version` and `prompt_ids`. `scale --limit 400` relabels the first 400 saved seed *rows* (there are 444 gpt-oss-20b answers in the seed file), writes `forecasting/results/rejudge_pool.jsonl`, and trees every hallucinating row in that pool. It does not mix in old labels from the 44 rows it did not rejudge.
 
 The GPT-5-mini **seed** judge is `seed_judge` (`seed_judge.v5`) plus HalluHard **webscraper** evidence: extract checkable particulars, Serper-search, fetch top pages/PDFs, label Hallucinating only if a particular is contradicted or fabricated. A true textbook mechanism with no citation is not a hallucination. Failed fetches fall back to snippets and stay Not Hallucinating. HTML fetch uses httpx and does not import `aiohttp`; if `judge_raw` shows `fetch_error: ModuleNotFoundError: No module named 'aiohttp'` on every claim with `fetched_pages: 0`, that run never saw page text — pull this checkout and rejudge. The tree labels DROP/CORRECT/REPEAT/DEPEND use a different prompt, `turn_label`. After changing `seed_judge` or the webscraper step, relabel saved answers without regenerating GPT-OSS:
 
