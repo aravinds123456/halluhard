@@ -105,14 +105,14 @@ python forecasting/pipeline.py report --tree forecasting/cascade_tree_dnv.jsonl
 
 A 100-seed tree without `forecasting/results/pilot.json` from step 2 exits with the lecture warning. Prompts are `forecasting/prompts/pack.json`; every row stores `prompt_pack_version` and `prompt_ids`.
 
-The GPT-5-mini **seed** judge is `seed_judge` (`seed_judge.v5`) plus Serper: extract checkable particulars, search, label Hallucinating only if a particular is contradicted or fabricated against snippets. A true textbook mechanism with no citation is not a hallucination. The tree labels DROP/CORRECT/REPEAT/DEPEND use a different prompt, `turn_label`. After changing `seed_judge` or the Serper step, relabel saved answers without regenerating GPT-OSS:
+The GPT-5-mini **seed** judge is `seed_judge` (`seed_judge.v5`) plus HalluHard **webscraper** evidence: extract checkable particulars, Serper-search, fetch top pages/PDFs, label Hallucinating only if a particular is contradicted or fabricated. A true textbook mechanism with no citation is not a hallucination. Failed fetches fall back to snippets and stay Not Hallucinating. The tree labels DROP/CORRECT/REPEAT/DEPEND use a different prompt, `turn_label`. After changing `seed_judge` or the webscraper step, relabel saved answers without regenerating GPT-OSS:
 
 ```bash
 git pull halluhard main
 python forecasting/generate_seeds.py --pilot --rejudge
 ```
 
-Do not delete the seed file for a judge change. Deleting it would redraw answers and confound the judge with the model. v5 does not treat missing citations as hallucinations and does not aim for a target hallucination rate. 3/10 can be a real rate if the model mostly restated the excerpt.
+Do not delete the seed file for a judge change. Deleting it would redraw answers and confound the judge with the model. v6 does not treat missing citations as hallucinations and does not aim for a target hallucination rate. 3/10 can be a real rate if the model mostly restated the excerpt.
 
 If your Azure endpoint is Models-as-a-Service, set
 `AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/`.
@@ -151,7 +151,7 @@ pixi run forecast-report
 |---|---|
 | `prompts/pack.json` | Versioned judge and follow-up prompts |
 | `prompts_pack.py` | Load those prompts; require the 10-example pilot |
-| `web_verify.py` | Serper extract → search → snippet judge for seed claims |
+| `web_verify.py` | HalluHard webscraper: extract → Serper → fetch pages/PDFs → judge seed claims |
 | `runtime.py` | Azure GPT-OSS chat, optional local HF, OpenAI judge |
 | `generate_seeds.py` | Seed generation |
 | `pipeline.py` | CLI |
@@ -176,8 +176,9 @@ Do not point `--seeds` at a Qwen file if the tree is GPT-OSS. Do not mix the old
 | `OPENAI_LABEL_MODEL` | `gpt-5-mini` | API model for judge + drafts |
 | `OPENAI_JUDGE_REASONING_EFFORT` | `medium` | HalluHard `gpt-5-mini-medium` thinking for claim/turn judges |
 | `OPENAI_AUX_REASONING_EFFORT` | `minimal` | HalluHard extractor / follow-up drafts |
-| `SERPER_API_KEY` | — | Web evidence for seed claims (paper path) |
+| `SERPER_API_KEY` | — | Web search for seed claims (HalluHard webscraper path) |
 | `CASCADE_WEB` | `1` | Set `0` for LLM-only seed claims (`--no-web`) |
+| `CASCADE_WEB_FETCH` | `1` | Set `0` to judge Serper snippets without fetching pages |
 | `MAX_QUESTIONS` | all HalluHard items | Cap seed generation |
 | `MAX_EXAMPLES` | `100` | Seeds in the tree |
 | `NUM_TURNS` | `2` | Tree depth |

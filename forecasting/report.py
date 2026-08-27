@@ -73,7 +73,7 @@ reasoning."
 What else to keep
 =================
 - 50/50 research vs legal/medical among Hallucinating seeds. Not-Hallucinating rows are not tree seeds.
-- Seed Hallucinating labels use Serper snippets (HalluHard structured analysis). Do not grow a tree on a true textbook mechanism.
+- Seed Hallucinating labels use HalluHard webscraper evidence (Serper + page/PDF fetch). Do not grow a tree on a true textbook mechanism.
 - Derive branch outcomes from DROP/CORRECT/REPEAT/DEPEND; report last-turn separately. Do not mix vocabularies.
 - Generate seeds with the model under test (GPT-OSS seeds for a GPT-OSS tree).
 - Wilson 95% CIs and the domain split; the formatted PDF was an incomplete sample.

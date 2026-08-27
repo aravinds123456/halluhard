@@ -177,7 +177,7 @@ def apply_seed_judgement(
         updated["web_verification"] = web_verification
         updated["web_false_claim"] = web_verification.get("false_claim") or ""
         updated["entities"] = web_verification.get("entities") or updated.get("entities") or []
-        updated["judge_method"] = web_verification.get("method") or "serper"
+        updated["judge_method"] = web_verification.get("method") or "webscraper"
     else:
         updated["judge_method"] = updated.get("judge_method") or "llm"
     return updated
@@ -365,10 +365,12 @@ def main():
     print(f"Judge model: {active_judge_model()}")
     if web_verify.web_flag_disabled():
         print("Seed evidence: LLM-only (--no-web / CASCADE_WEB=0). Not the HalluHard paper path.")
+    elif web_verify.fetch_flag_disabled():
+        print("Seed evidence: gpt-5-mini-medium thinking + Serper snippets (CASCADE_WEB_FETCH=0)")
     else:
         print(
-            "Seed evidence: gpt-5-mini-medium thinking + Serper "
-            "(HalluHard --type serper / webscraper defaults)"
+            "Seed evidence: gpt-5-mini-medium thinking + Serper search + page/PDF fetch "
+            "(HalluHard --type webscraper)"
         )
     print(f"Thinking: {'on' if ENABLE_THINKING else 'off'}")
     print(f"Prompt pack: v{prompt_pack_version()} ids={prompt_ids()}")

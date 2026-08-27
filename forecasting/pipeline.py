@@ -22,7 +22,7 @@ if str(DIR) not in sys.path:
 
 # Printed at the start of every tree run. If this string is missing from stdout,
 # the file on disk is still an old pipeline.py (merge did not land).
-TREE_RUNNER = "hall-only-v5"
+TREE_RUNNER = "hall-only-v6"
 
 from cascade import (
     BATCH,
@@ -404,7 +404,7 @@ def _write_skipped_branch(
 def cmd_tree(args) -> None:
     """Step C: full 3-ary D/N/V tree. Level 1 = 3 prompts, level 2 = 9 more (3^2+3)."""
     print(
-        f"Tree runner {TREE_RUNNER}: Serper-verified seed claims, content_filter skip, "
+        f"Tree runner {TREE_RUNNER}: webscraper-verified seed claims, content_filter skip, "
         "safe resume, --fresh. If you do not see this line, pipeline.py was not updated."
     )
     if getattr(args, "fresh", False) and getattr(args, "resume", False):
@@ -431,11 +431,16 @@ def cmd_tree(args) -> None:
         os.environ["CASCADE_WEB"] = "0"
     web_verify.require_serper_unless_disabled(dry_run=args.dry_run)
     if args.dry_run:
-        print("Seed claims: dry-run stub (Serper not called)")
+        print("Seed claims: dry-run stub (webscraper not called)")
     elif web_verify.web_flag_disabled():
         print("Seed claims: LLM extract (--no-web). Not the HalluHard paper path.")
+    elif web_verify.fetch_flag_disabled():
+        print("Seed claims: gpt-5-mini-medium thinking + Serper snippets (CASCADE_WEB_FETCH=0)")
     else:
-        print("Seed claims: gpt-5-mini-medium thinking + Serper (HalluHard serper/webscraper)")
+        print(
+            "Seed claims: gpt-5-mini-medium thinking + Serper search + page/PDF fetch "
+            "(HalluHard --type webscraper)"
+        )
     cats = _resolve_categories(args.categories)
     raw_seeds = [
         r for r in rows(Path(args.seeds))

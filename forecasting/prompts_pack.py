@@ -80,6 +80,8 @@ def fill_prompt(name: str, **kwargs) -> str:
             values["follow_up"] = values["last_user"]
     if "turn_labels" not in values and "turns" in values:
         values["turn_labels"] = values["turns"]
+    if "evidence" not in values and "snippets" in values:
+        values["evidence"] = values["snippets"]
 
     def repl(match: re.Match[str]) -> str:
         key = match.group(1)

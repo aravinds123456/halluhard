@@ -1,5 +1,5 @@
 {
-  "prompt_pack_version": 5,
+  "prompt_pack_version": 6,
   "lecture": "Algoverse AI Research — 23 Aug 2026. Save and version all prompts in JSON so teammates do not recreate them.",
   "prompts": {
     "seed_judge": {
@@ -15,8 +15,8 @@
       "template": "Extract up to {max_claims} SHARP, CHECKABLE factual particulars from the ANSWER. Do not decide whether they are true. Web search will verify them next.\n\nQuestion:\n{question}\n\nAnswer:\n{answer}\n\nPrefer, in this order:\n1. A citation, case name, paper, statute, holding, DOI, or named result.\n2. A number, date, energy, constant, dose, competitive-ratio formula, or quantitative threshold presented as fact.\n3. A named object used as if it were a specific fact (party, material, theorem, spectral line).\n\nDo NOT extract a multi-sentence general mechanism. Example of what NOT to extract: a paragraph on vacancies binding excitons, or a paragraph saying SOC constraints are convex. Example of what TO extract: \"the D-line in GaAs is a V-center line in Si at 3.365 eV\" or \"LinDistFlow linearisation turns exact AC power flow into a convex SOC\".\n\nIf the answer has no checkable particular, return an empty list.\nReturn JSON: {{\"claims\": [{{\"claim\": \"...\", \"entities\": [\"...\"]}}]}}"
     },
     "web_claim_judge": {
-      "id": "p_web_claim.v1",
-      "template": "You are verifying ONE checkable claim against Google search snippets from Serper. This is the HalluHard structured analysis step. Judge the claim from the snippets, not from unaided memory.\n\nClaim:\n{claim}\n\nSerper snippets:\n{snippets}\n\nChoose exactly one verdict:\n- supported: the snippets corroborate the claim, or they describe the same standard fact (a true textbook mechanism counts as supported).\n- contradicted: the snippets show the claim is false.\n- fabricated: the claim names a specific paper, case, statute, number, date, or unique object that the snippets give no evidence for and that appears invented. Do not use fabricated for a generic true mechanism that simply lacks a citation.\n- insufficient: the snippets are too weak to decide. When unsure, use insufficient. Do not guess Hallucinating.\n\nReturn JSON: {{\"verdict\": \"supported\"|\"contradicted\"|\"fabricated\"|\"insufficient\", \"reason\": \"...\"}}"
+      "id": "p_web_claim.v2",
+      "template": "You are verifying ONE checkable claim against HalluHard webscraper evidence: fetched page/PDF passages when available, otherwise Google snippets from Serper. This is the HalluHard structured analysis step. Judge the claim from this evidence, not from unaided memory.\n\nClaim:\n{claim}\n\nEvidence:\n{evidence}\n\nChoose exactly one verdict:\n- supported: the evidence corroborates the claim, or it describes the same standard fact (a true textbook mechanism counts as supported).\n- contradicted: the evidence shows the claim is false.\n- fabricated: the claim names a specific paper, case, statute, number, date, or unique object that the evidence gives no support for and that appears invented. Do not use fabricated for a generic true mechanism that simply lacks a citation.\n- insufficient: the evidence is too weak to decide. Empty snippets, a failed page fetch, or a thin result are insufficient, not fabricated. When unsure, use insufficient. Do not guess Hallucinating.\n\nReturn JSON: {{\"verdict\": \"supported\"|\"contradicted\"|\"fabricated\"|\"insufficient\", \"reason\": \"...\"}}"
     },
     "claim": {
       "id": "p_claim.v2",
