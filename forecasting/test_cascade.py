@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -89,10 +90,17 @@ class LabelTests(unittest.TestCase):
         turns = [{"turn": 1, "label": "repeat"}, {"turn": 2, "label": "depend"}, {"turn": 3, "label": "drop"}]
         self.assertEqual(derive_branch_outcome(turns)["branch_outcome"], "DEPEND")
         self.assertEqual(derive_branch_outcome(turns)["first_depend_turn"], 2)
+        self.assertEqual(derive_branch_outcome(turns)["last_turn_label"], "DROP")
 
     def test_branch_outcome_correct_without_cascade(self):
         turns = [{"turn": n, "label": "correct"} for n in range(1, 6)]
         self.assertEqual(derive_branch_outcome(turns)["branch_outcome"], "CORRECT")
+
+    def test_last_turn_can_be_correct_while_max_severity_is_depend(self):
+        turns = [{"turn": 1, "label": "depend"}, {"turn": 2, "label": "correct"}]
+        derived = derive_branch_outcome(turns)
+        self.assertEqual(derived["branch_outcome"], "DEPEND")
+        self.assertEqual(derived["last_turn_label"], "CORRECT")
 
     def test_all_drop_is_drop(self):
         turns = [{"turn": n, "label": "drop"} for n in range(1, 6)]
@@ -178,7 +186,7 @@ class LabelTests(unittest.TestCase):
     def test_fresh_deletes_existing_tree_and_rewrites(self):
         import argparse
         from pipeline import TREE_RUNNER, cmd_tree
-        self.assertEqual(TREE_RUNNER, "hall-only-v4")
+        self.assertEqual(TREE_RUNNER, "hall-only-v5")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "tree.jsonl"
             out.write_text('{"branch_id": "stale", "tree_depth": 1}\n')
@@ -222,14 +230,20 @@ class DesignDefaultTests(unittest.TestCase):
         self.assertTrue(_uses_responses_api("gpt-5-mini"))
         self.assertFalse(_uses_responses_api("gpt-4o-mini"))
 
-    def test_seed_judge_treats_unsupported_facts_as_hallucinations(self):
+    def test_seed_judge_does_not_treat_missing_citations_as_hallucinations(self):
         from generate_seeds import SEED_JUDGE_TEMPLATE, parse_seed_judgement
         self.assertIn("Hallucinating", SEED_JUDGE_TEMPLATE)
-        self.assertIn("without any supporting citation", SEED_JUDGE_TEMPLATE)
-        self.assertIn("Hedged", SEED_JUDGE_TEMPLATE)
-        self.assertIn("Grounded", SEED_JUDGE_TEMPLATE)
+        self.assertIn("Not Hallucinating", SEED_JUDGE_TEMPLATE)
+        self.assertNotIn("without any supporting citation", SEED_JUDGE_TEMPLATE)
+        self.assertIn("Lack of a citation is not a hallucination", SEED_JUDGE_TEMPLATE)
+        self.assertIn("textbook mechanism", SEED_JUDGE_TEMPLATE)
         label, _ = parse_seed_judgement("Overall label: Hallucinating\nReason: invented citation")
         self.assertEqual(label, "Hallucinating")
+        json_label, json_reason = parse_seed_judgement(
+            '{"label": "Hedged", "reason": "uncertain, no fabricated particular"}'
+        )
+        self.assertEqual(json_label, "Not Hallucinating")
+        self.assertIn("uncertain", json_reason)
 
     def test_rejudge_rewrites_labels_not_answers(self):
         from generate_seeds import apply_seed_judgement, rejudge_target_indexes
@@ -268,8 +282,8 @@ class DesignDefaultTests(unittest.TestCase):
         )
         self.assertEqual(updated["model_answer"], "The radius is 13.02 km.")
         self.assertEqual(updated["gemini_judgement"], "Overall label: Hallucinating")
-        self.assertEqual(updated["prompt_ids"]["seed_judge"], "seed_judge.v4")
-        self.assertEqual(updated["prompt_pack_version"], 4)
+        self.assertEqual(updated["prompt_ids"]["seed_judge"], "seed_judge.v5")
+        self.assertEqual(updated["prompt_pack_version"], 5)
 
 
 class SamplingTests(unittest.TestCase):
@@ -459,8 +473,9 @@ class PartialRunTests(unittest.TestCase):
             self.assertFalse(any("persisted_active" in json.dumps(row) or "persisted_dormant" in json.dumps(row) for row in lines))
             self.assertTrue(all(row.get("seed_class") in {"hallucinating", "not_hallucinating"} for row in lines))
             self.assertTrue(all(row.get("domain_group") in {"research", "other"} for row in lines))
-            self.assertTrue(all(row.get("prompt_pack_version") == 4 for row in lines))
-            self.assertTrue(all("seed_judge.v4" in row.get("prompt_ids", {}).values() for row in lines))
+            self.assertTrue(all(row.get("prompt_pack_version") == 5 for row in lines))
+            self.assertTrue(all("seed_judge.v5" in row.get("prompt_ids", {}).values() for row in lines))
+            self.assertTrue(all(row.get("last_turn_label") == "DROP" for row in lines))
 
 
 class VerificationTests(unittest.TestCase):
@@ -579,6 +594,37 @@ class JudgeRetryTests(unittest.TestCase):
         self.assertEqual(label, "correct")
         self.assertEqual(status, "retried")
 
+    def test_turn_label_prompt_contains_follow_up_and_reply(self):
+        import pipeline
+
+        calls = []
+
+        def fake_gpt(prompt, as_json=True):
+            calls.append(prompt)
+            return {"label": "DROP", "reason": "unrelated topic"}
+
+        previous = pipeline.gpt
+        pipeline.gpt = fake_gpt
+        self.addCleanup(lambda: setattr(pipeline, "gpt", previous))
+        pipeline._judge_turn(
+            "original question",
+            "the D-line in GaAs is a V-center line in Si at 3.365 eV",
+            "seed answer",
+            [
+                {"role": "user", "content": "original question"},
+                {"role": "assistant", "content": "seed answer"},
+                {"role": "user", "content": "Can you check that 3.365 eV assignment?"},
+                {"role": "assistant", "content": "I was wrong; that energy is not a GaAs D-line."},
+            ],
+            "I was wrong; that energy is not a GaAs D-line.",
+            dry_run=False,
+        )
+        self.assertTrue(calls)
+        self.assertIn("Can you check that 3.365 eV assignment?", calls[0])
+        self.assertIn("I was wrong; that energy is not a GaAs D-line.", calls[0])
+        self.assertNotIn("{follow_up}", calls[0])
+        self.assertNotIn("{answer}", calls[0])
+
 
 class AzureDeploymentTests(unittest.TestCase):
     def test_deployment_missing_message_is_not_a_second_key(self):
@@ -598,20 +644,27 @@ class AzureDeploymentTests(unittest.TestCase):
 class AlgoverseWorkflowTests(unittest.TestCase):
     def test_prompts_are_loaded_from_versioned_json(self):
         from prompts_pack import fill_prompt, prompt_ids, prompt_pack_version, prompt_text
-        self.assertEqual(prompt_pack_version(), 4)
-        self.assertEqual(prompt_ids()["seed_judge"], "seed_judge.v4")
+        self.assertEqual(prompt_pack_version(), 5)
+        self.assertEqual(prompt_ids()["seed_judge"], "seed_judge.v5")
         self.assertEqual(prompt_ids()["turn_label"], "p_turn.v3")
         self.assertEqual(prompt_ids()["draft_follow_up"], "p_draft.v3")
         self.assertEqual(prompt_ids()["claim"], "p_claim.v2")
         self.assertEqual(prompt_ids()["claim_control"], "p_claim_control.v2")
+        self.assertEqual(prompt_ids()["claim_candidates"], "p_claim_candidates.v1")
+        self.assertEqual(prompt_ids()["web_claim_judge"], "p_web_claim.v1")
         self.assertIn("use DEPEND, not REPEAT", prompt_text("turn_label"))
         self.assertIn("Hallucinating", prompt_text("seed_judge"))
-        self.assertIn("without any supporting citation", prompt_text("seed_judge"))
-        self.assertIn("Hedged", prompt_text("seed_judge"))
-        self.assertIn("Grounded", prompt_text("seed_judge"))
+        self.assertIn("Lack of a citation is not a hallucination", prompt_text("seed_judge"))
+        self.assertIn("Serper", prompt_text("web_claim_judge"))
+        self.assertNotIn("without any supporting citation", prompt_text("seed_judge"))
         filled = fill_prompt("seed_judge", question="Q?", answer="A.")
         self.assertIn("Q?", filled)
         self.assertIn("A.", filled)
+        aliased = fill_prompt("turn_label", q="orig", claim="C", ask="Is C true?", last="No, C is false.")
+        self.assertIn("Is C true?", aliased)
+        self.assertIn("No, C is false.", aliased)
+        self.assertNotIn("{follow_up}", aliased)
+        self.assertNotIn("{answer}", aliased)
 
     def test_scaling_past_ten_requires_a_matching_pilot(self):
         import prompts_pack
@@ -626,6 +679,81 @@ class AlgoverseWorkflowTests(unittest.TestCase):
             prompts_pack.require_pilot(stage="tree", n=10, dry_run=False, skip_pilot=False)
             prompts_pack.write_pilot_stage("tree", n=10, model="gpt-oss-20b")
             prompts_pack.require_pilot(stage="tree", n=100, dry_run=False, skip_pilot=False)
+
+
+class WebVerifyTests(unittest.TestCase):
+    def test_supported_textbook_claim_is_not_hallucinating(self):
+        import web_verify
+
+        def fake_gpt(prompt, as_json=True):
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "Vacancies bind excitons in GaAs.", "entities": ["GaAs"]}]}
+            return {"verdict": "supported", "reason": "standard semiconductor physics"}
+
+        def fake_search(claim):
+            return "Vacancies in GaAs form bound-exciton states.", claim, None
+
+        result = web_verify.verify_seed_answer("q", "a", fake_gpt, search_fn=fake_search)
+        self.assertFalse(result["hallucinating"])
+        self.assertEqual(result["false_claim"], "")
+        self.assertEqual(result["method"], "serper")
+
+    def test_contradicted_particular_is_the_cascade_claim(self):
+        import web_verify
+
+        def fake_gpt(prompt, as_json=True):
+            if "Extract up to" in prompt:
+                return {
+                    "claims": [
+                        {"claim": "Vacancies bind excitons.", "entities": ["vacancy"]},
+                        {"claim": "the D-line in GaAs is a V-center line in Si at 3.365 eV", "entities": ["3.365 eV"]},
+                    ]
+                }
+            if "3.365" in prompt:
+                return {"verdict": "contradicted", "reason": "3.365 eV is a Si V-center line, not GaAs"}
+            return {"verdict": "supported", "reason": "true"}
+
+        def fake_search(claim):
+            return f"snippets for {claim}", claim, None
+
+        result = web_verify.verify_seed_answer("q", "a", fake_gpt, search_fn=fake_search)
+        self.assertTrue(result["hallucinating"])
+        self.assertIn("3.365", result["false_claim"])
+
+    def test_insufficient_snippets_do_not_invent_a_hallucination(self):
+        import web_verify
+
+        def fake_gpt(prompt, as_json=True):
+            if "Extract up to" in prompt:
+                return {"claims": [{"claim": "Paper X reports Y=0.42", "entities": ["Paper X"]}]}
+            return {"verdict": "insufficient", "reason": "snippets too thin"}
+
+        result = web_verify.verify_seed_answer(
+            "q", "a", fake_gpt, search_fn=lambda claim: ("", claim, "timeout")
+        )
+        self.assertFalse(result["hallucinating"])
+
+    def test_serper_required_unless_disabled(self):
+        import web_verify
+
+        previous_key = os.environ.get("SERPER_API_KEY")
+        previous_web = os.environ.get("CASCADE_WEB")
+        os.environ.pop("SERPER_API_KEY", None)
+        os.environ["CASCADE_WEB"] = "1"
+
+        def restore():
+            os.environ.pop("SERPER_API_KEY", None)
+            os.environ.pop("CASCADE_WEB", None)
+            if previous_key is not None:
+                os.environ["SERPER_API_KEY"] = previous_key
+            if previous_web is not None:
+                os.environ["CASCADE_WEB"] = previous_web
+
+        self.addCleanup(restore)
+        with self.assertRaises(SystemExit) as raised:
+            web_verify.require_serper_unless_disabled(dry_run=False)
+        self.assertIn("SERPER_API_KEY", str(raised.exception))
+        web_verify.require_serper_unless_disabled(dry_run=True)
 
 
 if __name__ == "__main__":

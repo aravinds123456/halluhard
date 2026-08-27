@@ -494,9 +494,12 @@ def derive_branch_outcome(turns: list[dict]) -> dict:
                 return turn.get("turn")
         return None
 
+    last = parsed[-1] if parsed else None
+    last_turn_label = BRANCH_OUTCOME_BY_LABEL[last] if last else "UNPARSED"
     return {
         "branch_outcome": outcome,
         "final_label": outcome,
+        "last_turn_label": last_turn_label,
         "label_counts": label_counts,
         "first_depend_turn": first_turn_with("depend"),
         "first_correct_turn": first_turn_with("correct"),

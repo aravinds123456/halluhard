@@ -58,8 +58,28 @@ def prompt_text(name: str) -> str:
 
 
 def fill_prompt(name: str, **kwargs) -> str:
-    """Replace {placeholders} without treating JSON braces as format fields."""
+    """Replace {placeholders} without treating JSON braces as format fields.
+
+    Pack v4 renamed {q}/{a}/{cat}/{last} to {question}/{answer}/{mode}/{follow_up}.
+    Accept both so a live tree never labels against literal leftover braces.
+    """
     values = {key: "" if value is None else str(value) for key, value in kwargs.items()}
+    if "question" not in values and "q" in values:
+        values["question"] = values["q"]
+    if "answer" not in values:
+        if "a" in values:
+            values["answer"] = values["a"]
+        elif "last" in values:
+            values["answer"] = values["last"]
+    if "mode" not in values and "cat" in values:
+        values["mode"] = values["cat"]
+    if "follow_up" not in values:
+        if "ask" in values:
+            values["follow_up"] = values["ask"]
+        elif "last_user" in values:
+            values["follow_up"] = values["last_user"]
+    if "turn_labels" not in values and "turns" in values:
+        values["turn_labels"] = values["turns"]
 
     def repl(match: re.Match[str]) -> str:
         key = match.group(1)

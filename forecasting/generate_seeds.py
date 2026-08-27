@@ -46,6 +46,7 @@ from prompts_pack import (
     require_pilot,
     write_pilot_stage,
 )
+import web_verify
 
 MODEL_NAME = env_str("TEST_MODEL", env_str("QWEN_MODEL", DEFAULT_TEST_MODEL))
 SEED_SCHEMA_VERSION = 3
@@ -71,18 +72,38 @@ SEED_REASON_PATTERN = re.compile(r"Reason:\s*(.+)", re.IGNORECASE | re.DOTALL)
 
 
 def parse_seed_judgement(text: str) -> tuple[str, str]:
-    match = SEED_LABEL_PATTERN.search(text)
+    raw = (text or "").strip()
+    blob = raw
+    if "```" in blob:
+        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", blob, re.DOTALL)
+        if fenced:
+            blob = fenced.group(1).strip()
+    if blob.startswith("{"):
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            reason = str(parsed.get("reason") or "").strip()
+            label_raw = str(parsed.get("label") or parsed.get("overall_label") or "").strip().lower()
+            if parsed.get("hallucinating") is True or label_raw in {"hallucinating", "true"}:
+                return "Hallucinating", reason
+            if parsed.get("hallucinating") is False or label_raw in {
+                "not hallucinating", "hedged", "grounded", "false",
+            }:
+                return "Not Hallucinating", reason
+    match = SEED_LABEL_PATTERN.search(text or "")
     if match:
         normalized = re.sub(r"\s+", " ", match.group(1)).strip().lower()
         label = "Not Hallucinating" if normalized.startswith("not") else "Hallucinating"
-    elif re.search(r"\bnot\s+hallucinat", text, re.I):
+    elif re.search(r"\bnot\s+hallucinat", text or "", re.I):
         label = "Not Hallucinating"
-    elif re.search(r"\bhallucinat", text, re.I):
+    elif re.search(r"\bhallucinat", text or "", re.I):
         label = "Hallucinating"
     else:
-        print(f"Warning: unparseable seed judgement, treating as clean. Raw: {text[:160]}")
+        print(f"Warning: unparseable seed judgement, treating as clean. Raw: {(text or '')[:160]}")
         label = "Not Hallucinating"
-    reason_match = SEED_REASON_PATTERN.search(text)
+    reason_match = SEED_REASON_PATTERN.search(text or "")
     reason = reason_match.group(1).strip().split("\n")[0] if reason_match else ""
     return label, reason
 
@@ -136,7 +157,14 @@ def rewrite_seeds(records: list[dict]) -> None:
         write(SEEDS_PATH, record, True)
 
 
-def apply_seed_judgement(record: dict, label: str, reason: str, judge_raw: str, judge_model: str) -> dict:
+def apply_seed_judgement(
+    record: dict,
+    label: str,
+    reason: str,
+    judge_raw: str,
+    judge_model: str,
+    web_verification: dict | None = None,
+) -> dict:
     """Stamp a new seed-judge label onto an existing generation. Does not change the answer."""
     updated = dict(record)
     updated["gemini_judgement"] = f"Overall label: {label}"
@@ -145,6 +173,13 @@ def apply_seed_judgement(record: dict, label: str, reason: str, judge_raw: str, 
     updated["judge_model_name"] = judge_model
     updated["prompt_pack_version"] = prompt_pack_version()
     updated["prompt_ids"] = prompt_ids()
+    if web_verification is not None:
+        updated["web_verification"] = web_verification
+        updated["web_false_claim"] = web_verification.get("false_claim") or ""
+        updated["entities"] = web_verification.get("entities") or updated.get("entities") or []
+        updated["judge_method"] = web_verification.get("method") or "serper"
+    else:
+        updated["judge_method"] = updated.get("judge_method") or "llm"
     return updated
 
 
@@ -219,16 +254,23 @@ def generate_seed_answer(question: str, question_number: int, sample_index: int)
     return strip_question_prefix(question, answer), features, rng_seed
 
 
-def judge_seed(question: str, answer: str):
+def judge_seed(question: str, answer: str, *, use_web: bool | None = None):
     from runtime import call_gemini, gpt, judge_backend
 
+    if use_web is None:
+        use_web = web_verify.web_requested()
+    if use_web:
+        web_verify.require_serper_unless_disabled()
+        result = web_verify.verify_seed_answer(question, answer, gpt)
+        label = "Hallucinating" if result["hallucinating"] else "Not Hallucinating"
+        return label, result.get("reason") or "", json.dumps(result, ensure_ascii=False), result
     prompt = fill_prompt("seed_judge", question=question, answer=answer)
     if judge_backend() == "gemini":
         raw_text = call_gemini(prompt)
     else:
         raw_text = str(gpt(prompt, as_json=False)).strip()
     label, reason = parse_seed_judgement(raw_text)
-    return label, reason, raw_text
+    return label, reason, raw_text, None
 
 
 def rejudge_existing(question_items, pilot: bool) -> None:
@@ -262,10 +304,10 @@ def rejudge_existing(question_items, pilot: bool) -> None:
         if not answer:
             print(f"{progress}: empty answer, skipping")
             continue
-        label, reason, judge_raw = judge_seed(question, answer)
+        label, reason, judge_raw, web_verification = judge_seed(question, answer)
         label_counts[label] += 1
         records[record_index] = apply_seed_judgement(
-            record, label, reason, judge_raw, judge_name
+            record, label, reason, judge_raw, judge_name, web_verification=web_verification
         )
         print(f"{progress}: {label}" + (f" - {reason[:80]}" if reason else ""))
     rewrite_seeds(records)
@@ -321,6 +363,10 @@ def main():
         else:
             print("Azure temperature: omitted (GPT-OSS often rejects it; set AZURE_SEND_TEMPERATURE=1 to sample)")
     print(f"Judge model: {active_judge_model()}")
+    if web_verify.web_flag_disabled():
+        print("Seed evidence: LLM-only (--no-web / CASCADE_WEB=0). Not the paper path.")
+    else:
+        print("Seed evidence: Serper snippets + GPT judge (HalluHard structured analysis)")
     print(f"Thinking: {'on' if ENABLE_THINKING else 'off'}")
     print(f"Prompt pack: v{prompt_pack_version()} ids={prompt_ids()}")
     print("Workflow: debug prompts on ~10 examples (--pilot), then scale.")
@@ -345,6 +391,7 @@ def main():
     if dry_run:
         print("DRY_RUN=1 set; validation passed, exiting before model/API calls.")
         return
+    web_verify.require_serper_unless_disabled(dry_run=dry_run)
     if rejudge:
         rejudge_existing(question_items, pilot)
         return
@@ -390,7 +437,7 @@ def main():
             write(SEEDS_PATH, record, SEEDS_PATH.exists())
             print(f"{progress}: duplicate of an earlier sample, not judged")
             continue
-        label, reason, judge_raw = judge_seed(question, answer)
+        label, reason, judge_raw, web_verification = judge_seed(question, answer)
         label_counts[label] += 1
         record = {
             "seed_schema_version": SEED_SCHEMA_VERSION,
@@ -401,7 +448,6 @@ def main():
             "model_answer": answer,
             "qwen_answer": answer,
             "model_name": MODEL_NAME,
-            "judge_model_name": active_judge_model(),
             "enable_thinking": ENABLE_THINKING,
             "max_new_tokens": SEED_MAX_NEW_TOKENS,
             "temperature": TEMPERATURE,
@@ -409,12 +455,11 @@ def main():
             "top_k": TOP_K,
             "rng_seed": rng_seed,
             "duplicate_answer": False,
-            "gemini_judgement": f"Overall label: {label}",
-            "judge_reason": reason,
-            "judge_raw": judge_raw,
-            "prompt_pack_version": prompt_pack_version(),
-            "prompt_ids": prompt_ids(),
         }
+        record = apply_seed_judgement(
+            record, label, reason, judge_raw, active_judge_model(),
+            web_verification=web_verification,
+        )
         record["seed_id"] = seed_identifier(record)
         if features:
             record.update({f"gen_{name}": value for name, value in features.items()})

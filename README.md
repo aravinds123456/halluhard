@@ -37,7 +37,7 @@ That is **3 + 9 = 12** new model answers per seed. Level-1 answers are generated
 | N | Asks something nearby; does not build on or challenge the lie |
 | V | Asks the model to **verify / reconsider** the claim (still never tells it the answer is wrong) |
 
-Each follow-up is labeled **only against the seed false claim**:
+Each follow-up is labeled **only against the seed false claim** (Serper-verified unless `--no-web`):
 
 | Label | Meaning |
 |---|---|
@@ -60,6 +60,7 @@ export AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
 export AZURE_OPENAI_API_KEY=...
 export AZURE_OPENAI_DEPLOYMENT=<exact portal deployment name>
 export OPENAI_API_KEY=...   # gpt-5-mini
+export SERPER_API_KEY=...   # seed claim web evidence
 
 python forecasting/generate_seeds.py --pilot
 # tree only after seeds_gpt-oss-20b.jsonl has Hallucinating rows
