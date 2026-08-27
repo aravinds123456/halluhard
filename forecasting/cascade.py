@@ -262,6 +262,31 @@ def write(path: Path, record: dict, append: bool) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def is_skipped_node(record: dict) -> bool:
+    return record.get("node_kind") == "skipped" or bool(record.get("azure_skip_reason"))
+
+
+def is_azure_content_filter(error: BaseException) -> bool:
+    """Azure blocked the completion. Match the 400 body even if the SDK class differs."""
+    blob = f"{error} {getattr(error, 'body', '')}".lower()
+    return (
+        "content_filter" in blob
+        or "contentsafety" in blob
+        or "responsibleaipolicyviolation" in blob
+    )
+
+
+def content_filter_label_from_error(error: BaseException) -> str:
+    blob = f"{error} {getattr(error, 'body', '')}"
+    key = "label '"
+    if key in blob:
+        start = blob.find(key) + len(key)
+        end = blob.find("'", start)
+        if end > start:
+            return blob[start:end]
+    return ""
+
+
 def strip_thinking(text: str) -> str:
     cleaned = THINK_PATTERN.sub("", text or "")
     cleaned = re.sub(r"</?think>", "", cleaned, flags=re.I)

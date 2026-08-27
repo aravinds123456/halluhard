@@ -102,6 +102,17 @@ class LabelTests(unittest.TestCase):
         turns = [{"turn": 1, "label": "unparsed"}]
         self.assertEqual(derive_branch_outcome(turns)["branch_outcome"], "UNPARSED")
 
+    def test_azure_content_filter_400_is_detected(self):
+        from cascade import content_filter_label_from_error, is_azure_content_filter
+        err = RuntimeError(
+            "Error code: 400 - {'choices': [{'finish_reason': 'content_filter', "
+            "'content_filter_results': {'error': {'message': "
+            "\"Response content blocked by label 'MultiSeverity_SexualScore'.\"}}}]}"
+        )
+        self.assertTrue(is_azure_content_filter(err))
+        self.assertEqual(content_filter_label_from_error(err), "MultiSeverity_SexualScore")
+        self.assertFalse(is_azure_content_filter(RuntimeError("rate limit")))
+
 
 class DesignDefaultTests(unittest.TestCase):
     def test_default_run_is_hundred_seeds_and_two_levels(self):
