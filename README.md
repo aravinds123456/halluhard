@@ -37,7 +37,7 @@ That is **3 + 9 = 12** new model answers per seed. Level-1 answers are generated
 | N | Asks something nearby; does not build on or challenge the lie |
 | V | Asks the model to **verify / reconsider** the claim (still never tells it the answer is wrong) |
 
-Each follow-up is labeled **only against the seed false claim**:
+Each follow-up is labeled **only against the seed false claim** (Serper-verified unless `--no-web`):
 
 | Label | Meaning |
 |---|---|
@@ -48,7 +48,7 @@ Each follow-up is labeled **only against the seed false claim**:
 
 Path winner: **DEPEND > REPEAT > CORRECT > DROP**. CORRECT is not “smarter prose”; it is a recant. A fluent restatement of the same claim is REPEAT.
 
-Default answering model: Azure **GPT-OSS**. Judge and follow-up writer: **gpt-5-mini**. Algoverse lecture (23 Aug 2026): **debug ~10 examples, version prompts in JSON, then scale. Report every outcome. Do not overclaim.**
+Judge and follow-up writer: **gpt-5-mini**. Seed claim judging matches HalluHard `--type serper`: **gpt-5-mini-medium thinking + Serper**. Algoverse lecture (23 Aug 2026): **debug ~10 examples, version prompts in JSON, then scale. Report every outcome. Do not overclaim.**
 
 If this clone has two remotes, pull the cascade code from **`halluhard`**, not `origin` (that is often `HallucinationResearch`).
 
@@ -60,6 +60,7 @@ export AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
 export AZURE_OPENAI_API_KEY=...
 export AZURE_OPENAI_DEPLOYMENT=<exact portal deployment name>
 export OPENAI_API_KEY=...   # gpt-5-mini
+export SERPER_API_KEY=...   # seed claim web evidence
 
 python forecasting/generate_seeds.py --pilot
 # tree only after seeds_gpt-oss-20b.jsonl has Hallucinating rows

@@ -22,7 +22,7 @@ if str(DIR) not in sys.path:
 
 # Printed at the start of every tree run. If this string is missing from stdout,
 # the file on disk is still an old pipeline.py (merge did not land).
-TREE_RUNNER = "hall-only-v4"
+TREE_RUNNER = "hall-only-v5"
 
 from cascade import (
     BATCH,
@@ -86,13 +86,14 @@ from prompts_pack import (
     require_pilot,
     write_pilot_stage,
 )
+import web_verify
 
 QWEN = env_str("TEST_MODEL", env_str("QWEN_MODEL", DEFAULT_TEST_MODEL))
 
 
-def gpt(prompt: str, as_json: bool = True):
+def gpt(prompt: str, as_json: bool = True, **kwargs):
     from runtime import gpt as _gpt
-    return _gpt(prompt, as_json=as_json)
+    return _gpt(prompt, as_json=as_json, **kwargs)
 
 
 def load_answer_model(name: str):
@@ -143,7 +144,7 @@ def cmd_judge(args) -> None:
             if row["question_number"] in merged and merged[row["question_number"]].get("gemini_judgement"):
                 continue
             answer = strip_question_prefix(row["question"], row.get("qwen_answer") or row.get("model_answer", ""))
-            verdict = str(gpt(fill_prompt("seed_hallucination", q=row["question"][:2000], a=answer[:6000]), False)).strip()
+            verdict = str(gpt(fill_prompt("seed_hallucination", question=row["question"][:2000], answer=answer[:6000], q=row["question"][:2000], a=answer[:6000]), False, role="judge")).strip()
             if not verdict.startswith("Overall label:"):
                 verdict = (
                     f"Overall label: {'Hallucinating' if 'Hallucinating' in verdict else 'Not Hallucinating'}\n{verdict}"
@@ -158,15 +159,26 @@ def cmd_judge(args) -> None:
 
 
 def _extract_claim(
-    question: str, answer: str, dry_run: bool, *, hallucinated: bool = True,
-) -> tuple[str, list[str]]:
+    question: str, answer: str, dry_run: bool, *, hallucinated: bool = True, seed: dict | None = None,
+) -> tuple[str, list[str], dict | None]:
     if dry_run:
-        return answer[:200], []
+        return answer[:200], [], None
+    if hallucinated and seed:
+        stored = str(seed.get("web_false_claim") or "").strip()
+        if stored:
+            entities = [str(e) for e in (seed.get("entities") or []) if str(e).strip()][:4]
+            return stored, entities, seed.get("web_verification")
+    use_web = web_verify.web_requested()
+    if use_web and hallucinated:
+        result = web_verify.verify_seed_answer(question, answer, gpt)
+        if not result.get("hallucinating"):
+            return "", [], result
+        return result.get("false_claim") or "", result.get("entities") or [], result
     prompt_name = "claim" if hallucinated else "claim_control"
-    claim = gpt(fill_prompt(prompt_name, q=question[:1500], a=answer[:3000]))
+    claim = gpt(fill_prompt(prompt_name, question=question[:1500], answer=answer[:3000], q=question[:1500], a=answer[:3000]), role="aux")
     text = strip_thinking(str(claim.get("claim", "")))[:800]
     entities = [str(e) for e in claim.get("entities", [])][:4]
-    return text, entities
+    return text, entities, None
 
 
 def _label_from_payload(payload) -> tuple[str | None, str]:
@@ -199,15 +211,21 @@ def _judge_turn(
     )
     prompt = fill_prompt(
         "turn_label",
-        q=question[:1500], claim=claim, a=answer[:2500],
-        hist=history(messages), last=reply[:8000],
+        question=question[:1500],
+        claim=claim,
+        follow_up=_last_user(messages),
+        answer=reply[:8000],
+        q=question[:1500],
+        a=answer[:2500],
+        hist=history(messages),
+        last=reply[:8000],
         claim_kind=claim_kind,
     )
-    payload = gpt(prompt)
+    payload = gpt(prompt, role="judge")
     label, reason = _label_from_payload(payload)
     if label:
         return label, reason, "ok"
-    payload = gpt(prompt + "\n\n" + JUDGE_FORMAT_REMINDER)
+    payload = gpt(prompt + "\n\n" + JUDGE_FORMAT_REMINDER, role="judge")
     label, reason = _label_from_payload(payload)
     if label:
         return label, reason, "retried"
@@ -245,6 +263,20 @@ def _resolve_categories(raw: str) -> list[str]:
     return cats
 
 
+def _last_user(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return str(message.get("content") or "")
+    return ""
+
+
+def _seed_answer(messages: list[dict]) -> str:
+    for message in messages:
+        if message.get("role") == "assistant":
+            return str(message.get("content") or "")
+    return ""
+
+
 def _draft_follow_up(question, claim, messages, label, cat, entities, dry_run):
     """Draft a follow-up. Keep the LLM text unless it is empty, not a question, or leaks the answer."""
     fallback = backup(cat, entities, {
@@ -260,10 +292,18 @@ def _draft_follow_up(question, claim, messages, label, cat, entities, dry_run):
     for _ in range(2):
         drafted = str(gpt(fill_prompt(
             "draft_follow_up",
-            q=question[:1500], claim=claim, hist=history(messages),
-            state=label, hint=hint_for(label), cat=cat, rule=CATS[cat][0],
+            mode=cat,
+            question=question[:1500],
+            answer=_seed_answer(messages)[:3000],
+            claim=claim,
+            hist=history(messages),
+            q=question[:1500],
+            state=label,
+            hint=hint_for(label),
+            cat=cat,
+            rule=CATS[cat][0],
             intent=FOLLOWUP_TYPE_DESCRIPTIONS[cat],
-        )).get("follow_up", "")).strip()
+        ), role="aux").get("follow_up", "")).strip()
         why = check(drafted, cat, entities)
         last_why = why
         if drafted and not followup_is_hard_fail(why):
@@ -334,15 +374,16 @@ def _write_skipped_branch(
         "enable_thinking": ENABLE_THINKING,
         "question": question,
         "original_answer": first,
-        "false_claim": text,
-        "claim": text,
-        "seed_hallucinating": is_hall,
-        "seed_class": seed_class(seed),
-        "domain_group": domain_group(seed),
-        "entities": entities,
-        "levels": levels,
-        "branch_outcome": "SKIPPED",
-        "final_label": "SKIPPED",
+                        "false_claim": text,
+                        "claim": text,
+                        "seed_hallucinating": is_hall,
+                        "seed_class": seed_class(seed),
+                        "domain_group": domain_group(seed),
+                        "entities": entities,
+                        "levels": levels,
+                        "branch_outcome": "SKIPPED",
+                        "final_label": "SKIPPED",
+                        "last_turn_label": "SKIPPED",
         "azure_skip_reason": "content_filter",
         "azure_skip_label": label,
         "prompt_pack_version": prompt_pack_version(),
@@ -363,8 +404,8 @@ def _write_skipped_branch(
 def cmd_tree(args) -> None:
     """Step C: full 3-ary D/N/V tree. Level 1 = 3 prompts, level 2 = 9 more (3^2+3)."""
     print(
-        f"Tree runner {TREE_RUNNER}: content_filter skip, safe resume, --fresh. "
-        "If you do not see this line, pipeline.py was not updated."
+        f"Tree runner {TREE_RUNNER}: Serper-verified seed claims, content_filter skip, "
+        "safe resume, --fresh. If you do not see this line, pipeline.py was not updated."
     )
     if getattr(args, "fresh", False) and getattr(args, "resume", False):
         raise SystemExit("Use --fresh or --resume, not both. --fresh starts a new tree file.")
@@ -386,6 +427,15 @@ def cmd_tree(args) -> None:
         dry_run=args.dry_run,
         skip_pilot=getattr(args, "skip_pilot", False),
     )
+    if getattr(args, "no_web", False):
+        os.environ["CASCADE_WEB"] = "0"
+    web_verify.require_serper_unless_disabled(dry_run=args.dry_run)
+    if args.dry_run:
+        print("Seed claims: dry-run stub (Serper not called)")
+    elif web_verify.web_flag_disabled():
+        print("Seed claims: LLM extract (--no-web). Not the HalluHard paper path.")
+    else:
+        print("Seed claims: gpt-5-mini-medium thinking + Serper (HalluHard serper/webscraper)")
     cats = _resolve_categories(args.categories)
     raw_seeds = [
         r for r in rows(Path(args.seeds))
@@ -436,6 +486,7 @@ def cmd_tree(args) -> None:
         out=str(out),
     )
     chat = (lambda m: f"[stub] {m[-1]['content'][:60]}") if args.dry_run else load_answer_model(args.model)
+    skipped_unverified = 0
 
     for index, seed in enumerate(seeds, 1):
         question = seed["question"]
@@ -447,7 +498,16 @@ def cmd_tree(args) -> None:
         if all(branch_id(args.model, seed, path) in done for path in planned):
             continue
         is_hall = hallucinating(seed)
-        text, entities = _extract_claim(question, first, args.dry_run, hallucinated=is_hall)
+        text, entities, web_verification = _extract_claim(
+            question, first, args.dry_run, hallucinated=is_hall, seed=seed,
+        )
+        if is_hall and not args.dry_run and not text:
+            skipped_unverified += 1
+            print(
+                f"\n[{index}/{len(seeds)}] q{seed['question_number']} "
+                f"({domain_of(seed)}/{seed_class(seed)}): skip — no Serper-verified false particular"
+            )
+            continue
         features = _maybe_features(args, question, first)
         print(
             f"\n[{index}/{len(seeds)}] q{seed['question_number']} "
@@ -573,9 +633,12 @@ def cmd_tree(args) -> None:
                         "levels": args.levels,
                         "branch_outcome": derived["branch_outcome"],
                         "final_label": derived["final_label"],
+                        "last_turn_label": derived["last_turn_label"],
                         "label_counts": derived["label_counts"],
                         "first_depend_turn": derived["first_depend_turn"],
                         "first_correct_turn": derived["first_correct_turn"],
+                        "judge_method": (web_verification or {}).get("method") or seed.get("judge_method") or "llm",
+                        "web_false_claim": (web_verification or {}).get("false_claim") or seed.get("web_false_claim") or "",
                         "prompt_pack_version": prompt_pack_version(),
                         "prompt_ids": prompt_ids(),
                         **features,
@@ -616,6 +679,11 @@ def cmd_tree(args) -> None:
     if getattr(args, "pilot", False) and not args.dry_run:
         write_pilot_stage("tree", n=len(seeds), out=str(out), model=args.model)
         print("Recorded 10-example tree-prompt debug in forecasting/results/pilot.json")
+    if skipped_unverified:
+        print(
+            f"Skipped {skipped_unverified} LLM-Hallucinating seeds with no Serper-verified "
+            "false particular. Grow the tree only on web-contradicted or fabricated claims."
+        )
     print(f"\n-> {out}")
 
 
@@ -643,11 +711,13 @@ def cmd_label(args) -> None:
             out = gpt(fill_prompt(
                 "branch_label",
                 q=row["question"][:1500],
+                question=row["question"][:1500],
                 claim=str(row.get("false_claim") or row.get("claim", ""))[:800],
                 a=row["original_answer"][:2500],
                 turns=blob[:9000],
+                turn_labels=blob[:9000],
             ))
-            outcome = normalize_outcome(str(out.get("final_label", "")))
+            outcome = normalize_outcome(str(out.get("final_label") or out.get("label") or ""))
             reason = str(out.get("reason", reason))
         write(LABELS, {
             "schema_version": SCHEMA_VERSION,
@@ -710,6 +780,11 @@ def main() -> None:
         "--fresh",
         action="store_true",
         help="delete --out and start a new tree (do not combine with --resume)",
+    )
+    tree.add_argument(
+        "--no-web",
+        action="store_true",
+        help="LLM-only seed claims (not the paper path). Default is Serper web evidence.",
     )
     label = sub.add_parser("label", help="label branch outcomes")
     label.add_argument("--tree", default=str(TREE))

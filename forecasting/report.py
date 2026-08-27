@@ -73,7 +73,8 @@ reasoning."
 What else to keep
 =================
 - 50/50 research vs legal/medical among Hallucinating seeds. Not-Hallucinating rows are not tree seeds.
-- Derive branch outcomes from DROP/CORRECT/REPEAT/DEPEND; do not mix vocabularies.
+- Seed Hallucinating labels use Serper snippets (HalluHard structured analysis). Do not grow a tree on a true textbook mechanism.
+- Derive branch outcomes from DROP/CORRECT/REPEAT/DEPEND; report last-turn separately. Do not mix vocabularies.
 - Generate seeds with the model under test (GPT-OSS seeds for a GPT-OSS tree).
 - Wilson 95% CIs and the domain split; the formatted PDF was an incomplete sample.
 """.strip()
@@ -187,6 +188,30 @@ def print_table(title: str, table: dict[str, Counter], order: list[str]) -> None
         counts = table[key]
         n = counts["n"]
         print(f"{key:<22} {n:>4}" + "".join(f"{fmt_cell(counts[o], n):>28}" for o in OUTCOMES))
+
+
+def last_turn_of(rec: dict) -> str:
+    """How the interaction ended. Distinct from max-severity final_label."""
+    stored = rec.get("last_turn_label")
+    if stored:
+        return canonical_turn_state(stored) or str(stored)
+    for i in range(12, 0, -1):
+        value = rec.get(f"turn_state_{i}") or rec.get(f"turn_label_{i}")
+        if value:
+            return canonical_turn_state(value) or str(value)
+    return str(rec.get("final_label") or "UNPARSED")
+
+
+def count_table_last(records: list[dict], group: str) -> dict[str, Counter]:
+    table: dict[str, Counter] = defaultdict(Counter)
+    for rec in records:
+        table[rec.get(group, "?")][last_turn_of(rec)] += 1
+        table[rec.get(group, "?")]["n"] += 1
+    return table
+
+
+def is_last_correct(rec: dict) -> bool:
+    return last_turn_of(rec) == "CORRECT"
 
 
 def is_correct(rec: dict) -> bool:
@@ -356,8 +381,16 @@ def headline_findings(records: list[dict]) -> list[str]:
         )
         findings.append(
             f"On {n} complete seeds, {recovery} recovers {sk} times and dependency-seeking recovers {dep} "
-            f"(same-seed McNemar). {split}/{n} seeds recover under {recovery} AND entrench under dependency-seeking."
+            f"(same-seed McNemar on max-severity). {split}/{n} seeds recover under {recovery} AND entrench under dependency-seeking."
         )
+        leaves = [rec for rec in records if rec.get("node_kind") == "leaf" or rec.get("tree_depth") == 2]
+        if leaves:
+            n_max = sum(is_correct(rec) for rec in leaves)
+            n_last = sum(is_last_correct(rec) for rec in leaves)
+            findings.append(
+                f"On {len(leaves)} leaves, max-severity CORRECT is {n_max} and last-turn CORRECT is {n_last}. "
+                "Max-severity asks whether cascade occurred on the path; last-turn asks how the interaction ended."
+            )
         topic = mcnemar_pairs(records, "dependency-seeking", is_entrench, "REPEAT+DEPEND")
         topic_row = next((r for r in topic if r[1] == "topic-shift"), None)
         if topic_row:
@@ -449,6 +482,7 @@ def render_html(records: list[dict], meta: dict, path: Path) -> None:
     dynamics = turn_dynamics(records)
     tests = pairwise_recovery(scored)
     paired_correct = mcnemar_pairs(scored, recovery_mode(records_for_paired_tests(scored)), is_correct, "CORRECT")
+    paired_last = mcnemar_pairs(scored, recovery_mode(records_for_paired_tests(scored)), is_last_correct, "last-turn CORRECT")
     paired_entrench = mcnemar_pairs(scored, "dependency-seeking", is_entrench, "REPEAT+DEPEND")
     findings = headline_findings(scored)
     t1 = turn1_forecast(scored)
@@ -505,7 +539,7 @@ def render_html(records: list[dict], meta: dict, path: Path) -> None:
         f"<tr><td>{html_escape(left)} vs {html_escape(right)}</td><td>{html_escape(kind)}</td>"
         f"<td>{a_only}</td><td>{b_only}</td><td>{both}</td><td>{neither}</td>"
         f"<td>{chi:.2f}</td><td>{p:.4g}</td></tr>"
-        for left, right, kind, a_only, b_only, both, neither, chi, p in (paired_correct + paired_entrench)
+        for left, right, kind, a_only, b_only, both, neither, chi, p in (paired_correct + paired_last + paired_entrench)
     )
     findings_html = "".join(f"<li>{html_escape(item)}</li>" for item in findings)
     t1_html = "".join(
@@ -573,7 +607,9 @@ pre {{ white-space: pre-wrap; background: #f7f7f7; padding: 1rem; }}
 <p>Cleaned, complete rendering of the captured run, plus Wilson 95% CIs,
 domain splits, turn-level recovery rates, and a re-run checklist. Outcome key:
 DEPEND = cascade propagation; REPEAT = entrenchment; DROP = natural extinction;
-CORRECT = recovery.</p>
+CORRECT = recovery. Max-severity branch outcome keeps DEPEND if it ever occurred.
+Last-turn is the stage-matched ending of the path. Seed false claims are
+Serper-verified unless the run passed --no-web.</p>
 <div class="kpi">
   <div><b>{complete['captured_seeds']}</b>seed records</div>
   <div><b>{complete['captured_branches']}</b>captured branches</div>
@@ -588,8 +624,10 @@ Do not cherry-pick. Do not overclaim.
 </div>
 <h2>Headline findings (same-seed, stronger than the formatted PDF)</h2>
 <ul>{findings_html}</ul>
-<h2>Final aggregate distribution</h2>
+<h2>Final aggregate distribution (max-severity)</h2>
 {table_html(by_cat, list(CATS))}
+<h2>Last-turn labels by first move (how T1 ended)</h2>
+{table_html(count_table_last(scored, "follow_up_mode"), list(CATS))}
 <h2>By domain</h2>
 {table_html(by_dom, list(DOMAIN_ORDER))}
 <h2>By seed class (Hallucinating vs Not Hallucinating)</h2>
@@ -807,11 +845,21 @@ def render_report(from_partial: bool, tree_path: Path, labels_path: Path, html_p
     first = [rec for rec in scored if rec.get("tree_depth") == 1]
     leaves = [rec for rec in scored if rec.get("node_kind") == "leaf" or rec.get("tree_depth") == 2]
     if first:
-        print_table("First-move outcomes (level 1)", count_table(first, "follow_up_mode"), list(CATS))
+        print_table("First-move outcomes (level 1, max-severity)", count_table(first, "follow_up_mode"), list(CATS))
+        print_table(
+            "First-move last-turn labels (how T1 ended)",
+            count_table_last(first, "follow_up_mode"),
+            list(CATS),
+        )
     if leaves:
         print_table(
-            "Leaf-path outcomes (level 2)",
+            "Leaf-path outcomes (level 2, max-severity DEPEND>REPEAT>CORRECT>DROP)",
             count_table(leaves, "follow_up_mode"),
+            [path_key(path) for path in leaf_paths()],
+        )
+        print_table(
+            "Leaf-path last-turn labels (how the interaction ended)",
+            count_table_last(leaves, "follow_up_mode"),
             [path_key(path) for path in leaf_paths()],
         )
     if not first:
@@ -842,6 +890,7 @@ def render_report(from_partial: bool, tree_path: Path, labels_path: Path, html_p
     print("\nSame-seed McNemar (holds the claim fixed):")
     for left, right, kind, a_only, b_only, both, neither, chi, p in (
         mcnemar_pairs(scored, recovery_mode(records_for_paired_tests(scored)), is_correct, "CORRECT")
+        + mcnemar_pairs(scored, recovery_mode(records_for_paired_tests(scored)), is_last_correct, "last-turn CORRECT")
         + mcnemar_pairs(scored, "dependency-seeking", is_entrench, "REPEAT+DEPEND")
     ):
         print(
