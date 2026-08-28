@@ -23,7 +23,7 @@ if str(DIR) not in sys.path:
 
 # Printed at the start of every tree run. If this string is missing from stdout,
 # the file on disk is still an old pipeline.py (merge did not land).
-TREE_RUNNER = "hall-only-v7"
+TREE_RUNNER = "hall-only-v8"
 
 from cascade import (
     BATCH,
@@ -48,6 +48,8 @@ from cascade import (
     check,
     derive_branch_outcome,
     followup_is_hard_fail,
+    heuristic_realized_action,
+    parse_realized_action,
     normalize_category,
     path_key,
     prompt_count,
@@ -57,7 +59,6 @@ from cascade import (
     env_str,
     first_present_field,
     hallucinating,
-    hint_for,
     judged_seed,
     is_azure_content_filter,
     is_skipped_node,
@@ -77,6 +78,13 @@ from cascade import (
     strip_question_prefix,
     strip_thinking,
     write,
+)
+from grounding import (
+    VERIFIED_FALSE,
+    WebscraperGroundingBackend,
+    tree_eligible_record,
+    verified_seed_from_record,
+    verified_seed_from_web,
 )
 from prompts_pack import (
     DEFAULT_PILOT_SEEDS,
@@ -163,29 +171,34 @@ def _extract_claim(
     question: str, answer: str, dry_run: bool, *, hallucinated: bool = True, seed: dict | None = None,
 ) -> tuple[str, list[str], dict | None]:
     if dry_run:
-        return answer[:200], [], None
+        return answer[:200], [], {"seed_status": "DRY_RUN", "method": "dry-run"}
     if hallucinated and seed:
-        stored = str(seed.get("web_false_claim") or "").strip()
-        if stored:
-            entities = [str(e) for e in (seed.get("entities") or []) if str(e).strip()][:4]
-            return stored, entities, seed.get("web_verification")
+        verified = verified_seed_from_record(seed)
+        if verified.tree_eligible():
+            return verified.claim, verified.entities, verified.evidence or seed.get("web_verification")
     use_web = web_verify.web_requested()
     if use_web and hallucinated:
-        result = web_verify.verify_seed_answer(question, answer, gpt)
-        if not result.get("hallucinating"):
+        backend = WebscraperGroundingBackend(gpt)
+        verified = backend.verify(question, answer)
+        result = verified.evidence
+        if not verified.tree_eligible():
             return "", [], result
-        return result.get("false_claim") or "", result.get("entities") or [], result
+        return verified.claim, verified.entities, result
     prompt_name = "claim" if hallucinated else "claim_control"
-    claim = gpt(fill_prompt(prompt_name, question=question[:1500], answer=answer[:3000], q=question[:1500], a=answer[:3000]), role="aux")
+    claim = gpt(fill_prompt("claim" if hallucinated else "claim_control", question=question, answer=answer), role="aux")
     text = strip_thinking(str(claim.get("claim", "")))[:800]
     entities = [str(e) for e in claim.get("entities", [])][:4]
     return text, entities, None
 
 
-def _label_from_payload(payload) -> tuple[str | None, str]:
+def _label_from_payload(payload) -> tuple[str | None, str, str]:
     if isinstance(payload, dict):
         label = parse_judge_label(str(payload.get("label", "")))
-        return label, str(payload.get("reason", ""))
+        return (
+            label,
+            str(payload.get("reason", "")),
+            str(payload.get("dependency_chain") or payload.get("chain") or ""),
+        )
     text = str(payload or "").strip()
     try:
         data = json.loads(text)
@@ -193,17 +206,17 @@ def _label_from_payload(payload) -> tuple[str | None, str]:
         data = None
     if isinstance(data, dict):
         return _label_from_payload(data)
-    return parse_judge_label(text), text[:300]
+    return parse_judge_label(text), text[:300], ""
 
 
 def _judge_turn(
     question: str, claim: str, answer: str, messages: list[dict], reply: str, dry_run: bool,
     *, hallucinated: bool = True,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     if dry_run:
-        return "drop", "dry-run", "ok"
+        return "drop", "dry-run", "ok", ""
     claim_kind = (
-        "seed false claim (this seed answer was judged Hallucinating)"
+        "seed false claim (VERIFIED_FALSE)"
         if hallucinated
         else (
             "seed claim (this seed answer was judged Not Hallucinating; "
@@ -212,25 +225,44 @@ def _judge_turn(
     )
     prompt = fill_prompt(
         "turn_label",
-        question=question[:1500],
+        question=question,
         claim=claim,
         follow_up=_last_user(messages),
-        answer=reply[:8000],
-        q=question[:1500],
-        a=answer[:2500],
+        answer=reply,
         hist=history(messages),
-        last=reply[:8000],
         claim_kind=claim_kind,
     )
     payload = gpt(prompt, role="judge")
-    label, reason = _label_from_payload(payload)
+    label, reason, chain = _label_from_payload(payload)
     if label:
-        return label, reason, "ok"
+        return label, reason, "ok", chain
     payload = gpt(prompt + "\n\n" + JUDGE_FORMAT_REMINDER, role="judge")
-    label, reason = _label_from_payload(payload)
+    label, reason, chain = _label_from_payload(payload)
     if label:
-        return label, reason, "retried"
-    return "unparsed", reason or str(payload)[:300], "failed"
+        return label, reason, "retried", chain
+    return "unparsed", reason or str(payload)[:300], "failed", chain
+
+
+def _audit_action(follow_up: str, claim: str, intended: str, entities, dry_run: bool) -> tuple[str | None, str]:
+    """Return (realized_action, reason). Heuristic first; LLM audit unless dry-run."""
+    heuristic = heuristic_realized_action(follow_up, entities)
+    if dry_run:
+        return heuristic or intended, "dry-run"
+    payload = gpt(fill_prompt(
+        "action_audit",
+        follow_up=follow_up,
+        claim=claim,
+        mode=intended,
+    ), role="aux")
+    realized = parse_realized_action(payload if isinstance(payload, str) else json.dumps(payload))
+    if realized is None and isinstance(payload, dict):
+        realized = parse_realized_action(str(payload.get("realized_action") or ""))
+    reason = ""
+    if isinstance(payload, dict):
+        reason = str(payload.get("reason") or "")
+        if realized is None:
+            realized = parse_realized_action(str(payload.get("realized_action") or payload.get("action") or ""))
+    return realized or heuristic, reason
 
 
 def _maybe_features(args, question: str, answer: str) -> dict:
@@ -278,42 +310,36 @@ def _seed_answer(messages: list[dict]) -> str:
     return ""
 
 
-def _draft_follow_up(question, claim, messages, label, cat, entities, dry_run):
-    """Draft a follow-up. Keep the LLM text unless it is empty, not a question, or leaks the answer."""
-    fallback = backup(cat, entities, {
-        "correct": "corrected",
-        "repeat": "persisted",
-        "depend": "new_hallucination",
-        "drop": "not_applicable",
-    }.get(label, "persisted"))
+def _draft_follow_up(question, claim, messages, _label, cat, entities, dry_run):
+    """Draft a follow-up. Regenerate until realized action matches intended D/N/V.
+
+    Fallback templates are judge-independent and anchored to the seed claim.
+    The previous trajectory label is intentionally unused.
+    """
+    fallback = backup(cat, entities)
     if dry_run:
-        return fallback, "dry-run", "backup"
-    last_usable = None
+        return fallback, "dry-run", "backup", cat
     last_why = "empty"
-    for _ in range(2):
+    for _ in range(3):
         drafted = str(gpt(fill_prompt(
             "draft_follow_up",
             mode=cat,
-            question=question[:1500],
-            answer=_seed_answer(messages)[:3000],
+            question=question,
+            answer=_seed_answer(messages),
             claim=claim,
             hist=history(messages),
-            q=question[:1500],
-            state=label,
-            hint=hint_for(label),
             cat=cat,
             rule=CATS[cat][0],
             intent=FOLLOWUP_TYPE_DESCRIPTIONS[cat],
         ), role="aux").get("follow_up", "")).strip()
         why = check(drafted, cat, entities)
+        realized, _audit_reason = _audit_action(drafted, claim, cat, entities, dry_run)
+        if realized and realized != cat:
+            why = "action mismatch"
         last_why = why
-        if drafted and not followup_is_hard_fail(why):
-            last_usable = (drafted, why)
-            if not why:
-                return drafted, "", "draft"
-    if last_usable:
-        return last_usable[0], last_usable[1], "draft"
-    return fallback, last_why or "empty", "backup"
+        if drafted and realized == cat and not followup_is_hard_fail(why):
+            return drafted, why, "draft", realized
+    return fallback, last_why or "empty", "backup", cat
 
 
 def _messages_from_record(question: str, first: str, record: dict) -> list[dict]:
@@ -405,8 +431,9 @@ def _write_skipped_branch(
 def cmd_tree(args) -> None:
     """Step C: full 3-ary D/N/V tree. Level 1 = 3 prompts, level 2 = 9 more (3^2+3)."""
     print(
-        f"Tree runner {TREE_RUNNER}: webscraper-verified seed claims, content_filter skip, "
-        "safe resume, --fresh. If you do not see this line, pipeline.py was not updated."
+        f"Tree runner {TREE_RUNNER}: VERIFIED_FALSE seeds only, ActionAudit D/N/V, "
+        "full-transcript judge, transitive DEPEND, terminal S_t. "
+        "If you do not see this line, pipeline.py was not updated."
     )
     if getattr(args, "fresh", False) and getattr(args, "resume", False):
         raise SystemExit("Use --fresh or --resume, not both. --fresh starts a new tree file.")
@@ -444,12 +471,21 @@ def cmd_tree(args) -> None:
         )
         print(f"Fetch backend: {web_verify.describe_fetch_backend()}")
     cats = _resolve_categories(args.categories)
-    raw_seeds = [
-        r for r in rows(Path(args.seeds))
-        if hallucinating(r) and judged_seed(r) and not r.get("duplicate_answer")
-    ]
+    if args.dry_run:
+        raw_seeds = [
+            r for r in rows(Path(args.seeds))
+            if hallucinating(r) and judged_seed(r) and not r.get("duplicate_answer")
+        ]
+    else:
+        raw_seeds = [
+            r for r in rows(Path(args.seeds))
+            if tree_eligible_record(r) and not r.get("duplicate_answer")
+        ]
     if not raw_seeds:
-        raise SystemExit(f"No hallucinating seed rows in {args.seeds}")
+        raise SystemExit(
+            f"No VERIFIED_FALSE seed rows in {args.seeds}. "
+            "Rejudge with the current grounding backend before growing a tree."
+        )
     seeds = sample_seeds(raw_seeds, args.max_seeds)
     plan = sampling_plan(raw_seeds, args.max_seeds)
     out = Path(args.out)
@@ -469,7 +505,7 @@ def cmd_tree(args) -> None:
     print(f"Prompt pack: v{prompt_pack_version()} ids={prompt_ids()}")
     print("Workflow: debug prompts on ~10 examples (--pilot), then scale. Do not send 100+ first.")
     print(
-        "Sampling hallucinating seeds only, 50/50 research vs legal/medical: "
+        "Sampling VERIFIED_FALSE seeds only, 50/50 research vs legal/medical: "
         + ", ".join(
             f"{name} {plan[name]['selected']}/{plan[name]['available']}"
             for name in (
@@ -512,7 +548,7 @@ def cmd_tree(args) -> None:
             skipped_unverified += 1
             print(
                 f"\n[{index}/{len(seeds)}] q{seed['question_number']} "
-                f"({domain_of(seed)}/{seed_class(seed)}): skip — no Serper-verified false particular"
+                f"({domain_of(seed)}/{seed_class(seed)}): skip — not VERIFIED_FALSE"
             )
             continue
         features = _maybe_features(args, question, first)
@@ -563,7 +599,7 @@ def cmd_tree(args) -> None:
                             "turns": turns,
                         }
                         continue
-                    ask, why, source = _draft_follow_up(
+                    ask, why, source, realized = _draft_follow_up(
                         question, text, parent["messages"], parent["label"], cat, entities, args.dry_run,
                     )
                     messages = parent["messages"] + [{"role": "user", "content": ask}]
@@ -596,7 +632,7 @@ def cmd_tree(args) -> None:
                         done.add(bid)
                         continue
                     messages = messages + [{"role": "assistant", "content": reply}]
-                    label, reason, parse_status = _judge_turn(
+                    label, reason, parse_status, chain = _judge_turn(
                         question, text, first, messages, reply, args.dry_run,
                         hallucinated=is_hall,
                     )
@@ -611,6 +647,9 @@ def cmd_tree(args) -> None:
                         f"judge_parse_status_{depth}": parse_status,
                         f"rejected_{depth}": why,
                         f"follow_up_source_{depth}": source,
+                        f"intended_action_{depth}": cat,
+                        f"realized_action_{depth}": realized,
+                        f"dependency_chain_{depth}": chain,
                     })
                     record["judge_parse_status"] = worst_parse_status(
                         [record.get(f"judge_parse_status_{level}") for level in range(1, depth + 1)]
@@ -641,9 +680,13 @@ def cmd_tree(args) -> None:
                         "branch_outcome": derived["branch_outcome"],
                         "final_label": derived["final_label"],
                         "last_turn_label": derived["last_turn_label"],
+                        "ever_outcome": derived.get("ever_outcome"),
+                        "ever_depend": derived.get("ever_depend"),
                         "label_counts": derived["label_counts"],
                         "first_depend_turn": derived["first_depend_turn"],
+                        "first_retract_turn": derived.get("first_retract_turn"),
                         "first_correct_turn": derived["first_correct_turn"],
+                        "seed_status": (web_verification or {}).get("seed_status") or seed.get("seed_status") or VERIFIED_FALSE,
                         "judge_method": (web_verification or {}).get("method") or seed.get("judge_method") or "llm",
                         "web_false_claim": (web_verification or {}).get("false_claim") or seed.get("web_false_claim") or "",
                         "prompt_pack_version": prompt_pack_version(),
@@ -676,7 +719,7 @@ def cmd_tree(args) -> None:
                             "follow_up_mode": path_key(path),
                             "follow_up_path": list(path),
                             "tree_depth": depth,
-                            "reason": "derived from per-turn DROP/CORRECT/REPEAT/DEPEND labels",
+                            "reason": "terminal S_t from per-turn DROP/RETRACT/REPEAT/DEPEND labels",
                             "final_label": derived["final_label"],
                             "derived_label": derived["branch_outcome"],
                             "label_counts": derived["label_counts"],
@@ -688,14 +731,14 @@ def cmd_tree(args) -> None:
         print("Recorded 10-example tree-prompt debug in forecasting/results/pilot.json")
     if skipped_unverified:
         print(
-            f"Skipped {skipped_unverified} LLM-Hallucinating seeds with no Serper-verified "
-            "false particular. Grow the tree only on web-contradicted or fabricated claims."
+            f"Skipped {skipped_unverified} seeds that were not VERIFIED_FALSE. "
+            "Grow the tree only on confirmed web-contradicted or fabricated claims."
         )
     print(f"\n-> {out}")
 
 
 def cmd_label(args) -> None:
-    """Step D: derive DROP/CORRECT/REPEAT/DEPEND from per-turn labels, with optional LLM check."""
+    """Step D: derive DROP/RETRACT/REPEAT/DEPEND from per-turn labels, with optional LLM check."""
     done = {r["branch_id"] for r in rows(LABELS)} if args.resume else set()
     todo = [r for r in rows(Path(args.tree)) if r["branch_id"] not in done]
     print(f"Labeling {len(todo)} branches")
@@ -709,20 +752,20 @@ def cmd_label(args) -> None:
             turns.append({"turn": n, "label": label or "unparsed"})
         derived = derive_branch_outcome(turns)
         outcome = derived["branch_outcome"]
-        reason = "derived from per-turn DROP/CORRECT/REPEAT/DEPEND labels"
+        reason = "terminal S_t from per-turn DROP/RETRACT/REPEAT/DEPEND labels"
         if args.llm_label:
             blob = "\n\n".join(
-                f"USER: {row.get(f'follow_up_{n}', '')}\nASSISTANT: {row.get(f'future_turn_{n}', '')[:1500]}"
+                f"USER: {row.get(f'follow_up_{n}', '')}\nASSISTANT: {row.get(f'future_turn_{n}', '')}"
                 for n in range(1, row.get("levels", 5) + 1) if f"future_turn_{n}" in row
             )
             out = gpt(fill_prompt(
                 "branch_label",
-                q=row["question"][:1500],
-                question=row["question"][:1500],
-                claim=str(row.get("false_claim") or row.get("claim", ""))[:800],
-                a=row["original_answer"][:2500],
-                turns=blob[:9000],
-                turn_labels=blob[:9000],
+                q=row["question"],
+                question=row["question"],
+                claim=str(row.get("false_claim") or row.get("claim") or ""),
+                a=row["original_answer"],
+                turns=blob,
+                turn_labels=blob,
             ))
             outcome = normalize_outcome(str(out.get("final_label") or out.get("label") or ""))
             reason = str(out.get("reason", reason))

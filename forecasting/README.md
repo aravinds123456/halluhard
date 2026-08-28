@@ -39,27 +39,30 @@ Per seed: **3² + 3 = 12** answering-model prompts.
 
 ## Turn labels
 
-Each follow-up answer is judged **only against the seed false claim**:
+Each follow-up answer is judged **only against the seed false claim**, using the **full** branch transcript and the **full** model answer:
 
 | Label | Meaning |
 |---|---|
-| `DROP` | The lie is no longer used or fixed (it faded) |
-| `CORRECT` | The model retracts or replaces the lie |
-| `REPEAT` | The model says the same false thing again |
-| `DEPEND` | The model uses the lie as a premise for new content (cascade) |
+| `DROP` | The lie is not used, including any intermediate derived from it |
+| `RETRACT` | The model explicitly withdraws, rejects, or replaces the tracked claim |
+| `REPEAT` | The model restates the same false particular |
+| `DEPEND` | Direct **or transitive** use of the lie (or a C-derived intermediate) as a premise |
 
-The node outcome is derived from the labels on that path (`DEPEND` beats `REPEAT` beats `CORRECT` beats `DROP`). That answers whether cascade occurred. `last_turn_label` is the stage-matched ending of the same path (T2 can be CORRECT after a T1 DEPEND). Live logs and reports use those four names only. `persisted_active` / `persisted_dormant` were old PDF aliases and are mapped back to DEPEND / DROP if they appear in an old capture.
+Primary outcome is terminal \(S_t\) (`final_label` = `last_turn_label` = last turn). `ever_depend` / `first_depend_turn` are stored separately and are not the primary label. Live logs use DROP / RETRACT / REPEAT / DEPEND. `CORRECT` is a legacy alias for RETRACT. Old PDF aliases (`persisted_active` / `persisted_dormant`) map back to DEPEND / DROP.
 
-Follow-ups are written by gpt-5-mini. A keyword `check()` still logs style mismatches on `rejected_*`, but the drafted question is kept unless it is empty, has no `?`, or leaks the answer. The deterministic `backup()` template is only for those hard failures. Do not resume an old tree that already stored fallback D/V questions if you want this behavior.
+Follow-ups are drafted by gpt-5-mini, then **ActionAudited** until realized D/N/V matches the intended action. Neutral may not grant the hallucination as a premise (`If that claim were accurate…`). `rejected_*` is a heuristic log; `intended_action_*` and `realized_action_*` are the semantic audit. The deterministic `backup()` template is only used after ActionAudit retries fail. Verification backups always target the original tracked claim, not a later derived detail, and do not use the previous judge label.
 
-Judge labels are parsed **strictly** (`Overall label: DEPEND`, JSON `"label"`, or the bare token). Prose like “does not DEPEND” is not a label. Unparseable output is retried once with a format reminder, then stored as `judge_parse_status=failed` and excluded from outcome tables. It is not counted as DROP.
+Judge labels are parsed **strictly** (`Overall label: DEPEND`, JSON `"label"`, or the bare token). Prose like “does not DEPEND” is not a label. Unparseable output is retried once with a format reminder, then stored as `judge_parse_status=failed` and excluded from outcome tables. It is not counted as DROP. DEPEND rows also store `dependency_chain_*` when the judge returns one.
 
 ## Default run
 
-- **100** hallucinating seeds × **12** prompts = **1200** GPT-OSS answers (50 research / 50 legal+medical)
+- **100** VERIFIED_FALSE seeds × **12** prompts = **1200** GPT-OSS answers (50 research / 50 legal+medical)
 - Answering model: `gpt-oss-20b` on Azure (`TEST_MODEL`, `AZURE_OPENAI_*`)
-- Judge and follow-up writer: `gpt-5-mini` (`OPENAI_LABEL_MODEL`). The **claim judge** uses HalluHard's `gpt-5-mini-medium` thinking (`OPENAI_JUDGE_REASONING_EFFORT=medium`) plus Serper. Extractor and follow-up drafts stay `gpt-5-mini-minimal`.
-- Seeds are sampled **Hallucinating only**, **50/50 research vs legal/medical** (legal and medical share the non-research half). Not-Hallucinating rows stay in the seed file as a pool, not in the cascade tree.
+- Judge and follow-up writer: `gpt-5-mini` (`OPENAI_LABEL_MODEL`). The **claim judge** uses HalluHard's `gpt-5-mini-medium` thinking (`OPENAI_JUDGE_REASONING_EFFORT=medium`) plus Serper, then a false-claim confirmation. Extractor, drafts, and ActionAudit stay `gpt-5-mini-minimal`.
+- Seeds are sampled **VERIFIED_FALSE only**, **50/50 research vs legal/medical**. A first-pass Hallucinating label is not enough to grow a tree.
+- Live turn labels: **DROP / RETRACT / REPEAT / DEPEND**. CORRECT is a legacy alias for RETRACT. Primary outcome is terminal S_t; `ever_depend` is stored separately.
+- Follow-ups are ActionAudited until realized D/N/V matches intended. Neutral may not start with “If that claim…”.
+- Turn judge and follow-up writer see the **full** branch transcript and the **full** model answer (no 8k/3k truncation). DEPEND includes transitive use of C-derived intermediates.
 
 Teacher-forced token features are skipped on the Azure path (no local logits).
 
@@ -100,20 +103,20 @@ python forecasting/pipeline.py scale --limit 400 --skip-pilot
 # Same thing as two flags on generate_seeds:
 # python forecasting/generate_seeds.py --rejudge --limit 400 --tree --skip-pilot
 
-# 4) Tables include DROP/CORRECT/REPEAT/DEPEND, incomplete seeds, Wilson CIs
+# 4) Tables include DROP/RETRACT/REPEAT/DEPEND, incomplete seeds, Wilson CIs
 python forecasting/pipeline.py report --tree forecasting/cascade_tree_dnv.jsonl
 ```
 
-A 400-row rejudge+tree without `forecasting/results/pilot.json` from steps 1–2 exits with the lecture warning unless you pass `--skip-pilot`. Prompts are `forecasting/prompts/pack.json`; every row stores `prompt_pack_version` and `prompt_ids`. `scale --limit 400` relabels the first 400 saved seed *rows* (there are 444 gpt-oss-20b answers in the seed file), writes `forecasting/results/rejudge_pool.jsonl`, and trees every hallucinating row in that pool. It does not mix in old labels from the 44 rows it did not rejudge.
+A 400-row rejudge+tree without `forecasting/results/pilot.json` from steps 1–2 exits with the lecture warning unless you pass `--skip-pilot`. Prompts are `forecasting/prompts/pack.json` (**v7**); every row stores `prompt_pack_version` and `prompt_ids`. `scale --limit 400` relabels the first 400 saved seed *rows* (there are 444 gpt-oss-20b answers in the seed file), writes `forecasting/results/rejudge_pool.jsonl`, and trees every **VERIFIED_FALSE** row in that pool. A first-pass Hallucinating label is not enough. Pack v6 seed JSONL on main is **not** tree-eligible until it is rejudged with the v7 confirmation gate.
 
-The GPT-5-mini **seed** judge is `seed_judge` (`seed_judge.v5`) plus HalluHard **webscraper** evidence: extract checkable particulars, Serper-search, fetch top pages/PDFs, label Hallucinating only if a particular is contradicted or fabricated. A true textbook mechanism with no citation is not a hallucination. Failed fetches fall back to snippets and stay Not Hallucinating. HTML fetch uses httpx and does not import `aiohttp`; if `judge_raw` shows `fetch_error: ModuleNotFoundError: No module named 'aiohttp'` on every claim with `fetched_pages: 0`, that run never saw page text — pull this checkout and rejudge. The tree labels DROP/CORRECT/REPEAT/DEPEND use a different prompt, `turn_label`. After changing `seed_judge` or the webscraper step, relabel saved answers without regenerating GPT-OSS:
+The GPT-5-mini **seed** judge is `seed_judge` (`seed_judge.v5`) plus HalluHard **webscraper** evidence: extract checkable particulars, Serper-search, fetch top pages/PDFs, then a second-pass `false_confirm` so only `actually_false` claims become `seed_status=VERIFIED_FALSE`. A true textbook mechanism with no citation is not a hallucination. Algebraic equivalents (for example \(\varepsilon_0 E\times B\) vs \(E\times B/\mu_0\)) are supported, not contradicted. Failed fetches fall back to snippets and stay Not Hallucinating. HTML fetch uses httpx and does not import `aiohttp`; if `judge_raw` shows `fetch_error: ModuleNotFoundError: No module named 'aiohttp'` on every claim with `fetched_pages: 0`, that run never saw page text — pull this checkout and rejudge. The tree labels DROP/RETRACT/REPEAT/DEPEND use a different prompt, `turn_label`. After changing `seed_judge` or the webscraper step, relabel saved answers without regenerating GPT-OSS:
 
 ```bash
 git pull halluhard main
 python forecasting/generate_seeds.py --pilot --rejudge
 ```
 
-Do not delete the seed file for a judge change. Deleting it would redraw answers and confound the judge with the model. v6 does not treat missing citations as hallucinations and does not aim for a target hallucination rate. 3/10 can be a real rate if the model mostly restated the excerpt.
+Do not delete the seed file for a judge change. Deleting it would redraw answers and confound the judge with the model. Pack v7 requires `seed_status=VERIFIED_FALSE` (webscraper + false-claim confirmation) before a tree. Re-run `--pilot` after this pack bump; `--skip-pilot` on v6 pilots will be rejected.
 
 If your Azure endpoint is Models-as-a-Service, set
 `AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/`.
@@ -152,7 +155,8 @@ pixi run forecast-report
 |---|---|
 | `prompts/pack.json` | Versioned judge and follow-up prompts |
 | `prompts_pack.py` | Load those prompts; require the 10-example pilot |
-| `web_verify.py` | HalluHard webscraper: extract → Serper → fetch pages/PDFs → judge seed claims |
+| `web_verify.py` | HalluHard webscraper: extract → Serper → fetch pages/PDFs → judge + confirm false claims |
+| `grounding.py` | `DatasetAdapter → GroundingBackend → VerifiedSeed → TreeEngine` gate (`VERIFIED_FALSE` only) |
 | `runtime.py` | Azure GPT-OSS chat, optional local HF, OpenAI judge |
 | `generate_seeds.py` | Seed generation |
 | `pipeline.py` | CLI |
@@ -207,4 +211,4 @@ Pull, set `AZURE_OPENAI_DEPLOYMENT` to the portal name, then re-run **only** `--
 
 The rest of the repo is the **HalluHard benchmark**: generate cited multi-turn chats, web-ground claims, HTML reports.
 
-This folder **reuses HalluHard questions** but runs a different protocol (fixed lie, D/N/V tree, DROP/CORRECT/REPEAT/DEPEND). Labels here are about the **seed claim**, not a full-essay grade of the follow-up.
+This folder **reuses HalluHard questions** but runs a different protocol (fixed lie, D/N/V tree, DROP/RETRACT/REPEAT/DEPEND). Labels here are about the **seed claim**, not a full-essay grade of the follow-up.

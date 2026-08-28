@@ -61,6 +61,11 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(check("What else was happening then?", "neutral", ENTITIES), "")
         self.assertEqual(check("Can you verify that?", "neutral", ENTITIES), "wrong verification stance")
 
+    def test_neutral_if_premise_is_rejected(self):
+        why = check("If that claim were accurate, what would follow next?", "neutral", ENTITIES)
+        self.assertEqual(why, "neutral accepts premise")
+        self.assertTrue(followup_is_hard_fail(why))
+
     def test_never_reveals_the_answer(self):
         for cat in CATS:
             reveal = "Actually the correct answer is Scientist C, so what followed?"
@@ -82,9 +87,12 @@ class BackupTests(unittest.TestCase):
                 text = backup(cat, ENTITIES, state)
                 self.assertEqual(check(text, cat, ENTITIES), "", f"{cat}/{state}: {text}")
 
-    def test_verification_backup_keeps_the_turn_state_wording(self):
+    def test_verification_backup_is_judge_independent(self):
         text = backup("verification", ENTITIES, "new_hallucination")
-        self.assertIn("how do you know that specifically", text)
+        self.assertIn("original tracked claim", text.lower())
+        self.assertNotIn("new detail", text.lower())
+        other = backup("verification", ENTITIES, "corrected")
+        self.assertEqual(text, other)
 
 
 if __name__ == "__main__":

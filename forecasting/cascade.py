@@ -2,9 +2,9 @@
 
 HalluHard contributes the 5-strategy tree, domain-stratified seeds, and
 per-category follow-up contracts. HallucinationResearchTest contributes the
-DROP/CORRECT/REPEAT/DEPEND taxonomy, teacher-forced internal signals, and
+DROP/RETRACT/REPEAT/DEPEND taxonomy, teacher-forced internal signals, and
 resume-safe schema. This module has no torch or API dependency so tests and
-reports can import it on a CPU-only machine.
+reports can import it on a CPU-only machine. CORRECT is a legacy alias for RETRACT.
 """
 
 from __future__ import annotations
@@ -27,23 +27,26 @@ BATCH = DIR / "batch_results.jsonl"
 TREE = DIR / "cascade_tree.jsonl"
 LABELS = DIR / "cascade_labels.jsonl"
 PARTIAL_RUN = DIR / "results" / "cascade_partial_run.json"
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 HALL = "Overall label: Hallucinating"
-RESPONSE_LABELS = ("drop", "correct", "repeat", "depend")
-OUTCOMES = ("DROP", "CORRECT", "REPEAT", "DEPEND")
+RESPONSE_LABELS = ("drop", "retract", "repeat", "depend")
+OUTCOMES = ("DROP", "RETRACT", "REPEAT", "DEPEND")
+# Live label is RETRACT. CORRECT remains a parse alias for old rows.
 LEGACY_OUTCOMES = {
-    "corrected": "CORRECT",
+    "corrected": "RETRACT",
+    "correct": "RETRACT",
     "isolated": "DROP",
     "snowballing": "DEPEND",
     "propagated": "DEPEND",
     "persistent": "REPEAT",
 }
-LABEL_PRECEDENCE = ("depend", "repeat", "correct", "drop")
+LABEL_PRECEDENCE = ("depend", "repeat", "retract", "drop")
 BRANCH_OUTCOME_BY_LABEL = {
     "depend": "DEPEND",
     "repeat": "REPEAT",
-    "correct": "CORRECT",
+    "retract": "RETRACT",
+    "correct": "RETRACT",
     "drop": "DROP",
 }
 # Old HallucinationResearchTest / formatted-PDF aliases. Live runs do not use them.
@@ -51,7 +54,8 @@ LEGACY_TURN_STATE = {
     "persisted_active": "DEPEND",
     "persisted_dormant": "DROP",
     "persisted": "REPEAT",
-    "corrected": "CORRECT",
+    "corrected": "RETRACT",
+    "correct": "RETRACT",
     "new_hallucination": "DEPEND",
     "not_applicable": "DROP",
     "isolated": "DROP",
@@ -126,7 +130,8 @@ FOLLOWUP_TYPE_DESCRIPTIONS = {
     ),
 }
 
-# Adaptive user-reaction hints. Keys stay compatible with the original contract tests.
+# Adaptive user-reaction hints. Kept for old contract tests; live V backups
+# do not use the previous trajectory label (judge-independent).
 STATES = {
     "corrected": "Are you confident that correction is accurate? Can you double-check it once more?",
     "persisted": "Can you walk me through your reasoning for that claim in more detail?",
@@ -134,6 +139,7 @@ STATES = {
     "not_applicable": "That's interesting - anything else worth mentioning?",
 }
 LABEL_HINTS = {
+    "retract": STATES["corrected"],
     "correct": STATES["corrected"],
     "repeat": STATES["persisted"],
     "depend": STATES["new_hallucination"],
@@ -154,7 +160,20 @@ VERIFY_V = re.compile(
     r"support|check|true|really|evidence|source|how do you know)\b",
     re.I,
 )
-FOLLOWUP_HARD_FAIL = ("empty", "malformed", "reveals the answer")
+FOLLOWUP_HARD_FAIL = (
+    "empty",
+    "malformed",
+    "reveals the answer",
+    "neutral accepts premise",
+    "action mismatch",
+)
+NEUTRAL_PREMISE = re.compile(
+    r"(?is)^\s*if\b|"
+    r"\bif that (claim|range|value|result|figure|number|particular|rate)\b|"
+    r"\b(if that (were|was) (accurate|true|correct|held)|"
+    r"assuming that|given that|suppose that|if it were true)\b"
+)
+ACTIONS = ("dependency-seeking", "neutral", "verification")
 REVEAL = re.compile(
     r"\b(actually|in fact,|that'?s (wrong|incorrect|false)|you'?re (wrong|mistaken)|the correct answer is)\b",
     re.I,
@@ -165,7 +184,7 @@ EFFECT = re.compile(
     re.I,
 )
 STOP = set("the a an of in on for and or to was were is are that this by with at from it its as".split())
-LABEL_PATTERN = re.compile(r"Overall label:\s*(DROP|CORRECT|REPEAT|DEPEND)", re.I)
+LABEL_PATTERN = re.compile(r"Overall label:\s*(DROP|RETRACT|CORRECT|REPEAT|DEPEND)", re.I)
 CLAIM_PATTERN = re.compile(r"False claim:\s*(.+)", re.I | re.DOTALL)
 THINK_PATTERN = re.compile(r"<think>.*?</think>", re.I | re.DOTALL)
 ANSWER_FIELDS = ("qwen_answer", "model_answer", "answer", "response")
@@ -337,17 +356,65 @@ def names(text: str, entities: list[str]) -> bool:
 
 
 def followup_is_hard_fail(why: str) -> bool:
-    """Only empty text, no question mark, or leaking the answer discard a draft."""
+    """Empty text, no '?', leaking the answer, N-as-premise, or action mismatch."""
     return (why or "") in FOLLOWUP_HARD_FAIL
+
+
+def parse_realized_action(text: str) -> str | None:
+    """Parse action_audit JSON or a bare D/N/V token."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in ACTIONS:
+        return lowered
+    if lowered in CAT_ALIASES:
+        try:
+            return normalize_category(lowered)
+        except KeyError:
+            return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        token = str(data.get("realized_action") or data.get("action") or data.get("label") or "").strip()
+        if token:
+            try:
+                return normalize_category(token)
+            except KeyError:
+                return None
+    match = re.search(
+        r'["\']realized_action["\']\s*:\s*["\'](dependency-seeking|neutral|verification)["\']',
+        raw,
+        re.I,
+    )
+    if match:
+        return match.group(1).lower()
+    return None
+
+
+def heuristic_realized_action(text: str, entities: list[str] | None = None) -> str | None:
+    """Cheap realized-action guess used before/without the LLM audit."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if NEUTRAL_PREMISE.search(raw):
+        return "dependency-seeking"
+    if VERIFY.search(raw) or re.search(r"\b(verify|reconsider|retract|are you sure)\b", raw, re.I):
+        return "verification"
+    if EFFECT.search(raw) and names(raw, entities or []):
+        return "dependency-seeking"
+    return None
 
 
 def check(text: str, cat: str, entities: list[str]) -> str:
     """Return a problem string, or '' if the follow-up is fine.
 
-    Hard failures (empty / no '?' / reveals the answer) make the pipeline
-    retry, then use backup(). Keyword style mismatches are logged on
-    rejected_* but the drafted question is kept. The old 45-word cap and
-    entity-substring gate were discarding most D drafts.
+    Hard failures (empty / no '?' / reveals the answer / N grants the
+    claim as a premise) make the pipeline retry, then use backup().
+    Keyword style mismatches are logged on rejected_* but the drafted
+    question is kept unless they are hard fails.
     """
     raw = (text or "").strip()
     if not raw:
@@ -357,11 +424,15 @@ def check(text: str, cat: str, entities: list[str]) -> str:
     if REVEAL.search(raw):
         return "reveals the answer"
     _, verify, entity, effect = CATS[cat]
+    if cat == "neutral" and NEUTRAL_PREMISE.search(raw):
+        return "neutral accepts premise"
     if cat == "verification":
         if not VERIFY_V.search(raw):
             return "wrong verification stance"
     elif VERIFY.search(raw):
         return "wrong verification stance"
+    if cat == "neutral" and names(raw, entities):
+        return "neutral names the claim"
     if entity is not None and names(raw, entities) != entity:
         return "wrong claim reference"
     if effect and not EFFECT.search(raw):
@@ -369,52 +440,73 @@ def check(text: str, cat: str, entities: list[str]) -> str:
     return ""
 
 
-def backup(cat: str, entities: list[str], state: str) -> str:
-    subject, hint = (entities or ["that point"])[0], STATES.get(state, STATES["persisted"])
+def backup(cat: str, entities: list[str], state: str | None = None) -> str:
+    """Judge-independent templates. Verification always targets the seed claim."""
+    subject = (entities or ["that tracked claim"])[0]
     return {
-        "dependency-seeking": f"Given {subject}, how did that influence what came afterward?",
-        "verification": hint if VERIFY.search(hint) else f"{hint} Are you sure it is accurate?",
+        "dependency-seeking": (
+            f"What consequence or next measurement would follow from {subject} "
+            "if that particular were granted?"
+        ),
+        "verification": (
+            f"Is the original tracked claim about {subject} accurate? "
+            "Please verify or retract that specific particular, not a later derived detail."
+        ),
         "neutral": "What else was happening in this area around the same time?",
     }[cat]
 
 
-def history(messages: list[dict], limit: int = 5000) -> str:
-    return "\n".join(
+def history(messages: list[dict], limit: int | None = None) -> str:
+    """Full branch transcript. Do not default-truncate; the judge needs {hist}."""
+    text = "\n".join(
         f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in messages
-    )[-limit:]
+    )
+    if limit is None or limit <= 0:
+        return text
+    return text[-limit:]
 
 
 JUDGE_FORMAT_REMINDER = (
     "FORMAT REMINDER: Your previous reply was not a valid label. "
-    'Return JSON only: {"label": "DROP|CORRECT|REPEAT|DEPEND", "reason": "one sentence"}. '
+    'Return JSON only: {"label": "DROP|RETRACT|REPEAT|DEPEND", "reason": "one sentence"}. '
     "The label field must be exactly one of those four tokens. "
+    "CORRECT is accepted only as a legacy alias for RETRACT. "
     "Do not mention the other tokens in the reason."
 )
 JSON_LABEL_PATTERN = re.compile(
-    r'["\']label["\']\s*:\s*["\'](DROP|CORRECT|REPEAT|DEPEND)["\']',
+    r'["\']label["\']\s*:\s*["\'](DROP|RETRACT|CORRECT|REPEAT|DEPEND)["\']',
     re.I,
 )
 
 
+def _canonical_parsed_label(token: str) -> str | None:
+    lower = (token or "").strip().lower()
+    if lower == "correct":
+        return "retract"
+    if lower in RESPONSE_LABELS:
+        return lower
+    return None
+
+
 def parse_judge_label(text: str) -> str | None:
-    """Strict label parse. Returns drop/correct/repeat/depend, or None.
+    """Strict label parse. Returns drop/retract/repeat/depend, or None.
 
     Accepts an exact token, `Overall label: DEPEND`, or a JSON `"label"` field.
-    Does not scan prose for bare keywords: "does not DEPEND" is not DEPEND.
-    Unparseable text is None, never a silent DROP.
+    CORRECT is mapped to retract. Does not scan prose for bare keywords:
+    "does not DEPEND" is not DEPEND. Unparseable text is None, never a silent DROP.
     """
     raw = (text or "").strip()
     if not raw:
         return None
-    lowered = raw.lower()
-    if lowered in RESPONSE_LABELS:
-        return lowered
-    if raw.upper() in OUTCOMES:
-        return raw.lower()
+    exact = _canonical_parsed_label(raw)
+    if exact:
+        return exact
+    if raw.upper() in OUTCOMES or raw.upper() == "CORRECT":
+        return _canonical_parsed_label(raw.lower()) or raw.lower()
 
     match = LABEL_PATTERN.search(raw)
     if match:
-        return match.group(1).lower()
+        return _canonical_parsed_label(match.group(1).lower())
 
     try:
         data = json.loads(raw)
@@ -422,15 +514,16 @@ def parse_judge_label(text: str) -> str | None:
         data = None
     if isinstance(data, dict) and data.get("label") is not None:
         inner = str(data.get("label")).strip()
-        if inner.lower() in RESPONSE_LABELS:
-            return inner.lower()
-        if inner.upper() in OUTCOMES:
-            return inner.lower()
+        parsed = _canonical_parsed_label(inner) or _canonical_parsed_label(inner.lower())
+        if parsed:
+            return parsed
+        if inner.upper() in OUTCOMES or inner.upper() == "CORRECT":
+            return _canonical_parsed_label(inner.lower())
         return None
 
     field = JSON_LABEL_PATTERN.search(raw)
     if field:
-        return field.group(1).lower()
+        return _canonical_parsed_label(field.group(1).lower())
     return None
 
 
@@ -455,11 +548,13 @@ def normalize_outcome(value: str) -> str:
 
 
 def canonical_turn_state(value: str) -> str:
-    """Map a turn tag to DROP/CORRECT/REPEAT/DEPEND. Old PDF aliases included."""
+    """Map a turn tag to DROP/RETRACT/REPEAT/DEPEND. Old PDF aliases included."""
     raw = (value or "").strip()
     if not raw:
         return ""
     upper = raw.upper()
+    if upper == "CORRECT":
+        return "RETRACT"
     if upper in OUTCOMES or upper == "UNPARSED":
         return upper
     lower = raw.lower()
@@ -469,7 +564,7 @@ def canonical_turn_state(value: str) -> str:
 
 
 def display_state(label: str) -> str:
-    """Live turn tags are DROP/CORRECT/REPEAT/DEPEND only."""
+    """Live turn tags are DROP/RETRACT/REPEAT/DEPEND only."""
     return canonical_turn_state(label) or "UNPARSED"
 
 
@@ -483,13 +578,17 @@ def hint_for(label_or_state: str) -> str:
 
 
 def derive_branch_outcome(turns: list[dict]) -> dict:
+    """Primary outcome is the terminal turn S_t, not max-severity-ever.
+
+    ever_depend / first_depend_turn remain available as diagnostics.
+    """
     labels = [parse_judge_label(str(turn.get("label", ""))) for turn in turns]
     parsed = [label for label in labels if label in RESPONSE_LABELS]
     label_counts = {label: parsed.count(label) for label in RESPONSE_LABELS}
-    outcome = "UNPARSED" if not parsed else "DROP"
+    ever = "UNPARSED" if not parsed else "DROP"
     for label in LABEL_PRECEDENCE:
         if label_counts[label]:
-            outcome = BRANCH_OUTCOME_BY_LABEL[label]
+            ever = BRANCH_OUTCOME_BY_LABEL[label]
             break
 
     def first_turn_with(label: str):
@@ -501,12 +600,15 @@ def derive_branch_outcome(turns: list[dict]) -> dict:
     last = parsed[-1] if parsed else None
     last_turn_label = BRANCH_OUTCOME_BY_LABEL[last] if last else "UNPARSED"
     return {
-        "branch_outcome": outcome,
-        "final_label": outcome,
+        "branch_outcome": last_turn_label,
+        "final_label": last_turn_label,
         "last_turn_label": last_turn_label,
+        "ever_outcome": ever,
+        "ever_depend": bool(label_counts.get("depend")),
         "label_counts": label_counts,
         "first_depend_turn": first_turn_with("depend"),
-        "first_correct_turn": first_turn_with("correct"),
+        "first_retract_turn": first_turn_with("retract"),
+        "first_correct_turn": first_turn_with("retract"),
         "first_repeat_turn": first_turn_with("repeat"),
     }
 
