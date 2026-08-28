@@ -25,7 +25,7 @@ import os
 import re
 import sys
 from html.parser import HTMLParser
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 from cascade import DEFAULT_JUDGE_REASONING_EFFORT, env_str
@@ -56,9 +56,11 @@ _FETCH_HEADERS = {
 }
 
 GptFn = Callable[..., Any]
-SearchFn = Callable[[str], tuple[str, str, str | None]]
+# Runtime aliases (not postponed by from __future__ import annotations).
+# Keep these 3.9-safe: `str | None` here crashes on Python < 3.10 at import.
+SearchFn = Callable[[str], Tuple[str, str, Optional[str]]]
 # claim, snippets, urls -> (filtered_text, page records, error)
-FetchFn = Callable[[str, str, list[str]], tuple[str, list[dict], str | None]]
+FetchFn = Callable[[str, str, List[str]], Tuple[str, List[Dict[str, Any]], Optional[str]]]
 
 
 def invoke_gpt(gpt_fn: GptFn, prompt: str, *, role: str = "judge", as_json: bool = True):

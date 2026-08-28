@@ -817,6 +817,11 @@ class AlgoverseWorkflowTests(unittest.TestCase):
 
 
 class WebVerifyTests(unittest.TestCase):
+    def test_type_aliases_import_on_python39(self):
+        import web_verify
+        self.assertTrue(web_verify.SearchFn)
+        self.assertTrue(web_verify.FetchFn)
+
     def test_supported_textbook_claim_is_not_hallucinating(self):
         import web_verify
 
