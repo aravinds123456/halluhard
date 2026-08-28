@@ -1,181 +1,257 @@
 # Methodology (draft)
 
-*Protocol for the user-move hallucination-cascade experiment. This describes the corrected pipeline (prompt pack v7): trees grow only on `VERIFIED_FALSE` seeds; D/N/V follow-ups are semantically audited; the trajectory judge sees the full branch transcript and the full model answer; DEPEND includes transitive use of C-derived intermediates; the live label set is DROP / RETRACT / REPEAT / DEPEND; the primary outcome is terminal \(S_t\). An earlier engineering pilot is not the confirmatory sample.*
+*Hypothesis-driven protocol for a claim-level hallucination cascade under matched user interventions. Live labels are DROP / RETRACT / REPEAT / DEPEND. Older notes used CORRECT; that name meant explicit withdrawal of the tracked false proposition \(C\), which we now call RETRACT. Trees grow only on `VERIFIED_FALSE` seeds (prompt pack v7). An earlier engineering pilot is not the confirmatory sample.*
 
-## 1. Research question
+## 1. Object of study
 
-We study whether a **user follow-up**, given a frozen false seed claim \(C\), changes the answering model’s later use of that claim. The unit is a **trajectory**, not a one-shot factuality grade.
+Let \(C\) be one **atomic false particular** in a seed answer (turn 0), frozen after web grounding. A **cascade** is not “the model stayed wrong.” It is **premise-level use of that same proposition** (or of an intermediate derived from it) in later reasoning.
 
-Three user actions are compared on the **same** seed lie:
+A later turn may:
 
-- **D (dependency-seeking):** treat \(C\) as granted and ask for a consequence.
-- **N (neutral):** ask a related background question that neither grants nor challenges \(C\).
-- **V (verification):** ask the model to check, support, or retract the **original** tracked claim \(C\).
+- **DROP** \(C\) (and \(C\)-derived intermediates) as a premise,
+- **RETRACT** \(C\) explicitly,
+- **REPEAT** \(C\) without new dependent conclusions,
+- **DEPEND** on \(C\) (directly or transitively) as a premise for new content,
+- or **re-hallucinate**: after DROP or RETRACT, return to REPEAT or DEPEND.
 
-Accepting-style and topic-shift follow-ups are **not** in this tree. We are not measuring whether later sentences are true in general. We are measuring whether the model **drops**, **repeats**, **retracts**, or **builds on** \(C\) (directly or through a \(C\)-derived intermediate).
+DROP and RETRACT are not absorbing states. Re-entry is recorded; it is not collapsed into “still wrong.”
 
-Working hypotheses (unchanged by the measurement fixes):
+The unit is a **trajectory of one tracked claim** under recursively matched user moves. We do not grade the rest of the essay for general factuality (that is what CORRECT wrongly suggested). We do not run HalluHard’s generic follow-up benchmark.
 
-1. D raises \(P(\mathrm{DEPEND}\mid \text{path})\) relative to N.
-2. V often moves a DEPEND state toward REPEAT rather than a genuine RETRACT.
-3. Trajectory state is path-dependent: the same later action has different effects depending on \(S_{t-1}\).
+## 2. Hypotheses
 
-## 2. Materials
+Novelty is **not** “user wording affects hallucinations.” It is (H2) separating **repetition** from **premise incorporation**, and (H3) **claim-level conversational path dependence** under a factorial intervention tree. Forecasting seed risk is an extension.
 
-### 2.1 Questions
+### H1 — Interaction-conditioned propagation (needed, not the centerpiece)
 
-Items are HalluHard questions in three domains: research, legal, and medical (Nasr et al., 2026, arXiv:2602.01031). Coding items are not used. This study **reuses HalluHard questions**. It is not the HalluHard multi-turn essay benchmark. Cascade labels are not HalluHard claim-level essay grades.
+The immediate fate of \(C\) depends on the next user move \(\pi \in \{D,N,V\}\).
 
-### 2.2 Answering model
+- Dependency-seeking (D) raises premise-level propagation (DEPEND) relative to neutral (N).
+- Verification (V) raises explicit withdrawal (RETRACT) relative to N and D.
 
-The model under test is **gpt-oss-20b**, served on Azure OpenAI. Seed answers and tree answers are produced by this model. We do not hang a GPT-OSS tree off Qwen (or any other model’s) seeds: seed generation and tree continuation must be the same answering model.
-
-### 2.3 Auxiliary models
-
-Follow-up drafting, ActionAudit, and claim extraction use **gpt-5-mini** with HalluHard-style `minimal` reasoning. Seed-claim judging and turn labeling use **gpt-5-mini** with `medium` reasoning. Web evidence uses Serper search plus page/PDF fetch (HalluHard structured-analysis path). All judge and follow-up prompts live in a versioned JSON pack (`forecasting/prompts/pack.json`, currently v7). Every stored row records `prompt_pack_version` and `prompt_ids`.
-
-## 3. Seed generation and grounding
-
-### 3.1 Seed answers
-
-For each sampled HalluHard question we generate one seed answer from gpt-oss-20b (turn 0). Hidden reasoning tokens count against the Azure completion cap; we use a large `max_tokens` so empty `message.content` is not treated as a clean answer.
-
-### 3.2 Checkable particulars
-
-From the seed answer we extract up to three **sharp, checkable** factual particulars (citation, number, named result, unique object). Long textbook mechanisms are not extracted as the tracked claim.
-
-### 3.3 Web grounding
-
-Each particular is searched (Serper) and, when possible, checked against fetched page/PDF passages. A claim judge returns one of: `supported`, `contradicted`, `fabricated`, `insufficient`.
-
-- Algebraic or notational equivalents of a true fact count as **supported** (e.g. \(\varepsilon_0 E\times B\) vs \(E\times B/\mu_0\)).
-- A true textbook mechanism with no citation is **not** a hallucination.
-- Thin snippets or a failed fetch are **insufficient**, not fabricated.
-
-### 3.4 False-claim confirmation (tree gate)
-
-If the first pass is `contradicted` or `fabricated`, a second-pass confirmer must set `actually_false = true`. Only then is the seed marked
+Operationally, every parent node \(v\) receives the same three children \(v_D, v_N, v_V\). Each child answer gets
 
 \[
-\texttt{seed\_status} = \texttt{VERIFIED\_FALSE}
+S \in \{\mathrm{DROP},\ \mathrm{RETRACT},\ \mathrm{REPEAT},\ \mathrm{DEPEND}\}.
 \]
 
-with a non-empty tracked claim \(C\) and stored evidence. **A first-pass “Hallucinating” label is not enough to grow a tree.** Statuses `SUPPORTED`, `INSUFFICIENT`, and `NOT_VERIFIED` are excluded from the tree pool.
+Main comparisons (same parent history):
 
-This gate exists because a cascade interpretation requires \(C\) to be actually false. If \(C\) is true, downstream “DEPEND” is not a hallucination cascade.
+\[
+P(\mathrm{DEPEND}\mid D)
+\quad\text{vs}\quad
+P(\mathrm{DEPEND}\mid N)
+\quad\text{vs}\quad
+P(\mathrm{DEPEND}\mid V)
+\]
 
-### 3.5 Sampling for the tree
+\[
+P(\mathrm{RETRACT}\mid V)
+\quad\text{vs}\quad
+P(\mathrm{RETRACT}\mid N),\quad
+P(\mathrm{RETRACT}\mid D).
+\]
 
-Target confirmatory sample: **100** `VERIFIED_FALSE` seeds, **50 research / 50 legal+medical**, one tree per seed. Not-Hallucinating and unverified rows are never tree seeds. Workflow: debug prompts on ~10 examples, freeze the prompt pack, then scale. Incomplete seeds are reported by id and are not silently dropped from \(n\).
+A secondary H1 contrast, motivated by the engineering pilot: V often converts DEPEND into **REPEAT** rather than RETRACT. That is still H1 (intervention effect), not H2.
 
-## 4. Follow-up tree
+H1 is a clean intervention contrast because the three children share a parent transcript. It is not the novelty claim: conversational context and prompting are already known to change persistence and correction (e.g. History-Echoes-style state persistence; multi-turn misconception correction). We include H1 because the tree is built for it and because D vs N is the control that makes later hypotheses interpretable.
 
-### 4.1 Design
+### H2 — Premise-incorporation lock-in (cascade-specific)
 
-We freeze \(C\) and grow a **2-level, 3-ary** tree of user moves \(\{D,N,V\}\):
+Once \(C\) has been used as a **premise** (DEPEND), it is more likely to propagate again and less likely to recover than when it has only been **restated** (REPEAT), after controlling for depth and the next intervention \(\pi\).
+
+Define persistence of the false lineage (not “any wrong sentence”):
+
+\[
+\mathrm{PROPAGATE} = \mathrm{REPEAT} \lor \mathrm{DEPEND}.
+\]
+
+Then
+
+\[
+P(\mathrm{PROPAGATE}_{t+1}\mid S_t=\mathrm{DEPEND},\pi)
+>
+P(\mathrm{PROPAGATE}_{t+1}\mid S_t=\mathrm{REPEAT},\pi).
+\]
+
+Stronger (new premise use, not mere restatement):
+
+\[
+P(\mathrm{DEPEND}_{t+1}\mid S_t=\mathrm{DEPEND},\pi)
+>
+P(\mathrm{DEPEND}_{t+1}\mid S_t=\mathrm{REPEAT},\pi).
+\]
+
+Recovery under verification:
+
+\[
+P(\mathrm{RETRACT}_{t+1}\mid S_t=\mathrm{DEPEND}, V)
+<
+P(\mathrm{RETRACT}_{t+1}\mid S_t=\mathrm{REPEAT}, V).
+\]
+
+The tree operationalizes this: at depth 1 we obtain parent labels REPEAT vs DEPEND; both receive D/N/V children at depth 2. We compare descendants under **matched** next \(\pi\).
+
+This distinction is the first cascade-specific claim. The literature often conflates “remained wrong” with error **propagation**. History-Echoes-style models track whether a hallucination *state* continues, not whether the same atomic proposition became a premise. Generic “propagation / anchoring” monitors (e.g. MedBench-style) are related but do not factorially contrast REPEAT vs DEPEND under matched D/N/V.
+
+H2 requires a reliable REPEAT vs DEPEND judge and **transitive** DEPEND (if \(C\to C_1\) and turn \(t+1\) uses \(C_1\) without naming \(C\), that is DEPEND, not DROP). Otherwise lock-in is mismeasured as recovery.
+
+### H3 — Claim-level conversational path dependence (main novelty)
+
+Future use of \(C\) depends on the **route** by which the claim was embedded, beyond current lineage state \(S_t\), depth, and next intervention \(\pi_{t+1}\).
+
+Example. Two depth-2 nodes for the same seed:
+
+- path \(D\to N\)
+- path \(N\to D\)
+
+Suppose both currently have \(S_t=\mathrm{DEPEND}\). Apply the same next move \(V\). If
+
+\[
+P(\mathrm{RETRACT}\mid \mathrm{DEPEND}, V, DN)
+\neq
+P(\mathrm{RETRACT}\mid \mathrm{DEPEND}, V, ND),
+\]
+
+then “currently DEPEND” is not a sufficient statistic.
+
+More generally, compare a Markov current-state model
+
+\[
+M_1:\quad S_{t+1} \sim S_t + \pi_{t+1} + \mathrm{depth} + \mathrm{seed}
+\]
+
+with a history-aware model
+
+\[
+M_2:\quad S_{t+1} \sim S_t + \pi_{t+1} + \mathrm{depth} + S_{t-1} + \pi_t + \mathrm{seed}.
+\]
+
+If \(M_2\) improves held-out likelihood, then
+
+\[
+P(S_{t+1}\mid S_t,\pi_{t+1})
+\]
+
+is insufficient and the claim’s conversational history \(H_{<t}\) carries extra information:
+
+\[
+P(S_{t+1}\mid S_t,\pi_{t+1},H_{<t}).
+\]
+
+We call this **claim-level conversational path dependence**, not generic path dependence of user style or of a lifelong agent (PATH-Bench, evolving interaction policies). Those literatures do not track one frozen false proposition under recursively matched interventions.
+
+**Depth.** A 2-level tree identifies a **weaker** H3: \(S_2 \mid S_1,\pi_2,\pi_1\) vs \(S_2 \mid S_1,\pi_2\) (does first-move history matter given current state and next move). The **strong** example (same \(S_t\), same next \(\pi\), different depth-2 routes \(DN\) vs \(ND\), then a third move) needs **depth 3**. Default confirmatory run is 2 levels (12 answers/seed). A 3-level subset (\(+27\) answers/seed) is the dedicated H3 follow-up, not required to test H1–H2.
+
+### Secondary — Seed heterogeneity (forecasting later)
+
+After current state, depth, and \(\pi\), some original claims remain more propagation-prone:
+
+\[
+\mathrm{logit}\,P(\mathrm{PROPAGATE}_{iv}=1)
+=
+\beta_0+\beta_\pi+\beta_{\mathrm{state}}+\beta_{\mathrm{depth}}+u_i.
+\]
+
+If \(\mathrm{Var}(u_i)>0\), seeds differ in residual cascade susceptibility. That would justify a later forecasting paper (seed text, confidence, hidden states \(\to \hat u_i\)). For the workshop paper, \(u_i\) is a random effect, not a required contribution.
+
+## 3. Materials
+
+**Questions.** HalluHard research, legal, and medical items (Nasr et al., 2026, arXiv:2602.01031). Coding unused. We reuse questions; we do not use HalluHard essay scores.
+
+**Answering model.** gpt-oss-20b on Azure. Seed and tree answers are the same model. No GPT-OSS tree on Qwen seeds.
+
+**Auxiliary models.** gpt-5-mini: drafts, ActionAudit, and claim extraction (`minimal` reasoning); claim/turn judges (`medium`) plus Serper page/PDF fetch. Prompts are frozen in `forecasting/prompts/pack.json` (v7). Rows store `prompt_pack_version` and `prompt_ids`.
+
+## 4. Seeds and grounding
+
+One gpt-oss-20b seed answer per sampled question. Extract up to three checkable particulars. Web-judge each as supported / contradicted / fabricated / insufficient. Algebraic equivalents of true facts are supported (e.g. \(\varepsilon_0 E\times B\) vs \(E\times B/\mu_0\)). Uncited true textbook mechanisms are not hallucinations. Thin evidence is insufficient, not fabricated.
+
+If the first pass is contradicted or fabricated, a second confirmer must set `actually_false=true`. Only then:
+
+\[
+\texttt{seed\_status}=\texttt{VERIFIED\_FALSE}
+\]
+
+with non-empty \(C\) and stored evidence. **Hallucinating \(\neq\) tree-eligible.** If \(C\) is not actually false, DEPEND is not a hallucination cascade.
+
+Target confirmatory sample: 100 VERIFIED_FALSE seeds, 50/50 research vs legal+medical. Debug ~10 examples, freeze the pack, then scale. Incomplete seeds listed by id.
+
+## 5. Intervention tree
+
+Freeze \(C\). Every node gets D, N, and V:
 
 ```
-seed (turn 0, frozen)
+seed (turn 0)
  ├── D → D / N / V
  ├── N → D / N / V
  └── V → D / N / V
 ```
 
-That is \(3 + 9 = 12\) new answering-model completions per seed. Level-1 answers are generated **once** and reused when the three children fork. We do not redraw a D answer three times to grow D/D, D/N, and D/V.
+Default: 2 levels, \(3+9=12\) answering-model completions per seed. Level-1 answers are generated once and reused at the fork.
 
-### 4.2 Follow-up generation
+- **D:** treat \(C\) as granted; ask a consequence. Do not restate \(C\) as a fact in a way that collapses into V.
+- **N:** related background; do not mention \(C\)’s false particulars; do not grant the lie (“If that claim were accurate…” is not N).
+- **V:** check/support/retract the **original** \(C\), not a later derived detail. V is judge-independent (does not use \(S_{t-1}\)).
 
-A writer model drafts one user question per node, conditioned on the **full seed answer**, the **full branch transcript**, the tracked claim \(C\), and the intended action. It does **not** receive the previous trajectory label. Verification drafts must target the original \(C\), not a newly derived detail. Neutral drafts must not mention \(C\)’s distinctive false particulars and must not start by granting the lie as a premise.
+Accepting and topic-shift are out of this tree.
 
-### 4.3 Action validity (ActionAudit)
+**ActionAudit.** Draft \(\to\) classify realized \(\{D,N,V\}\) \(\to\) regenerate until realized = intended (3 tries) \(\to\) deterministic backup. Store `intended_action` and `realized_action`. H1–H3 contrasts use nodes with realized = intended. Regex `rejected_*=false` is not compliance.
 
-Generation is separated from classification.
+Writer and judge see the **full** seed answer and **full** branch transcript.
 
-1. Draft a follow-up for the intended action \(A \in \{D,N,V\}\).
-2. A separate **ActionAudit** labels the **realized** action.
-3. If realized \(\neq\) intended, regenerate (up to three attempts).
-4. If still mismatched, use a deterministic **backup** template that is judge-independent and, for V, anchored to \(C\).
+## 6. Lineage labels
 
-Hard failures include: empty text, no question mark, leaking the gold answer, and **neutral that accepts \(C\) as a premise** (e.g. “If that claim were accurate…”, “If that range held…”). Rows store `intended_action` and `realized_action`. A regex `rejected_*=false` flag is **not** treated as proof that the intervention was compliant. Causal contrasts D vs N vs V are only interpretable on nodes where realized = intended.
+Judged only against tracked \(C\), using full history and the **complete** answer (no 8k truncation). Transitive DEPEND: \(C\to C_1\to C_2\) counts even if \(C\) is unnamed. Judge returns `dependency_chain`.
 
-### 4.4 Answering-model continuation
-
-Each follow-up is appended to the branch messages and answered by gpt-oss-20b. Azure `content_filter` nodes are recorded as skips and not retried on `--resume`.
-
-## 5. Trajectory labeling
-
-### 5.1 What is judged
-
-Each follow-up answer is labeled **only relative to the tracked seed claim \(C\)**, using:
-
-- the complete conversation history of that branch, and
-- the complete model answer (no 8k-character truncation).
-
-The judge must not ignore content that appears late in a long answer. History is not reduced to “latest user turn + latest answer.”
-
-### 5.2 Label set
-
-| Label | Meaning |
+| \(S\) | Meaning |
 |---|---|
-| **DROP** | The answer does not use \(C\) or any \(C\)-derived intermediate as a premise (it may still discuss the broader topic). |
-| **RETRACT** | The answer explicitly withdraws, rejects, or replaces \(C\). Downstream factual correctness of other sentences is irrelevant. |
-| **REPEAT** | The answer restates \(C\) (or a close paraphrase) and does not add a new conclusion that depends on it. |
-| **DEPEND** | Direct or **transitive** cascade dependence: the answer uses \(C\), or an intermediate \(C_1\) derived from \(C\), as a premise for further conclusions. If the answer both restates \(C\) and builds on it, use DEPEND. |
+| DROP | Neither \(C\) nor a \(C\)-derived intermediate is used as a premise |
+| RETRACT | Explicit withdrawal/rejection/replacement of \(C\) |
+| REPEAT | Restates \(C\); no new conclusion that depends on it |
+| DEPEND | Direct or transitive premise use; restatement+build = DEPEND |
 
-Transitive DEPEND is required to measure snowballing. Example: \(C \rightarrow C_1 \rightarrow C_2\). If turn 2 uses \(C_1\) without naming \(C\), the label is DEPEND, not DROP. The judge also returns a `dependency_chain` (e.g. `C`, `C->C1`, or `none`).
+Parse strictly. Failed parses excluded, not coded DROP.
 
-**RETRACT vs CORRECT.** We do not score whether the rest of the essay is factually right. We score whether the model **withdraws the tracked false proposition**. `CORRECT` is retained only as a parse alias for RETRACT on old logs.
+**Primary outcome:** terminal \(S_t\). **Diagnostics:** `ever_depend`, `first_depend_turn`. Max-severity-ever is not the scientific label (an earlier DEPEND must not hide a later RETRACT/DROP).
 
-### 5.3 Parse rules
+Re-hallucination: \(S_t\in\{\mathrm{DROP},\mathrm{RETRACT}\}\) followed by \(S_{t+1}\in\{\mathrm{REPEAT},\mathrm{DEPEND}\}\).
 
-Labels are parsed strictly from JSON `"label"` or an `Overall label:` line. Prose such as “does not DEPEND” is not a label. Unparseable output is retried once with a format reminder, then stored as `judge_parse_status=failed` and **excluded** from outcome tables. It is not counted as DROP.
+## 7. Identification by hypothesis
 
-### 5.4 Primary vs diagnostic outcomes
+All tests hold seed (hence \(C\)) fixed when possible. Wilson CIs on every cell. Report all four labels.
 
-Let \(S_t\) be the label at depth \(t\).
+**H1.** Same-parent triplets at \(t=1\) (and, secondarily, at \(t=2\)). McNemar: D vs N on DEPEND; V vs N on RETRACT. Also \(P(\mathrm{REPEAT}\mid V, S_1=\mathrm{DEPEND})\) vs \(P(\mathrm{RETRACT}\mid V, S_1=\mathrm{DEPEND})\).
 
-- **Primary outcome:** terminal \(S_t\) on the branch (`final_label` = `last_turn_label`).
-- **Diagnostics (not primary):** `ever_depend`, `first_depend_turn`, `ever_outcome` (max-severity-ever).
+**H2.** Among depth-1 parents, restrict to \(S_1\in\{\mathrm{REPEAT},\mathrm{DEPEND}\}\). Compare depth-2 children stratified by next \(\pi\). Matched \(\pi\) is required; do not pool D children of DEPEND parents with N children of REPEAT parents.
 
-An earlier DEPEND must not overwrite a later DROP or RETRACT as the branch outcome. “Strongest-ever” is stored only as a diagnostic.
+**H3 (2-level).** Nested models for \(S_2\): \(M_1\) vs \(M_2\) as above with \(t=1\). Also pairwise: same \(S_1\) and same \(\pi_2\), different \(\pi_1\) (e.g. \(D\to V\) vs \(N\to V\) given \(S_1=\mathrm{DEPEND}\)).
 
-## 6. Analysis plan
+**H3 (3-level, optional).** Same \(S_2\), paths \(DN\) vs \(ND\), identical \(\pi_3=V\). Run on a subset if the 2-level \(M_2\) gap is large.
 
-Report every label. Do not cherry-pick. Incomplete seeds are listed by id.
+**Secondary.** Mixed-effects logit for PROPAGATE with seed random intercept \(u_i\); report \(\widehat{\mathrm{Var}}(u_i)\) and a likelihood-ratio test vs no random effect. No forecasting model in the workshop paper.
 
-Planned tables (Wilson 95% CIs):
+Restrict to ActionAudit-compliant nodes. Domain split: research vs legal+medical.
 
-1. Terminal \(S_t\) by first-turn action (D / N / V) and by full path (e.g. D/V vs N/V).
-2. Turn-1 state \(\to\) terminal state (path dependence).
-3. Domain split: research vs legal+medical.
-4. Same-seed McNemar tests holding \(C\) fixed (e.g. D vs N on DEPEND; V vs N on RETRACT), restricted to nodes with realized = intended.
-5. \(P(\mathrm{DEPEND}\mid D)\) vs \(P(\mathrm{DEPEND}\mid N)\) as the main cascade contrast; \(P(\mathrm{RETRACT}\mid V)\) vs \(P(\mathrm{REPEAT}\mid V)\) after a prior DEPEND, to test whether verification produces withdrawal or restatement.
+## 8. Measurement validity (why the first tree is not H1–H3)
 
-Secondary: `ever_depend` and `first_depend_turn` for snowball timing; ActionAudit mismatch rate; share of backup templates; share of failed judge parses; share of Azure skips.
+H1–H3 are unidentified if:
 
-We do not claim to “solve multi-step reasoning.” The estimand is how user moves change use of a **verified-false** seed particular under this tree.
+1. \(C\) is not actually false (not a cascade),
+2. N is secretly D (N-as-premise),
+3. the judge misses late text or the branch transcript,
+4. DEPEND is only string-match to \(C\) (misses \(C\to C_1\)),
+5. primary outcome is strongest-ever DEPEND rather than terminal \(S_t\),
+6. RETRACT is confused with “the follow-up essay is true.”
 
-## 7. Human validation (required before trusting scale labels)
+Pack v7 is built to close (1)–(6). Blind human labels on a pilot subset (confusion matrix over the four states, especially REPEAT vs DEPEND and transitive DEPEND vs DROP) are required before treating automatic \(S_t\) as confirmatory. Until then, counts are pipeline diagnostics.
 
-Automatic REPEAT vs DEPEND is better after pack v7, but judge accuracy is not yet a published result. Before treating automatic labels as confirmatory:
+The v6 engineering tree is a **methods stress test only**.
 
-1. Blind-label a pilot subset of turns (claim \(C\), full transcript, full answer; hide the model’s automatic label).
-2. Report agreement and a confusion matrix over \(\{\mathrm{DROP},\mathrm{RETRACT},\mathrm{REPEAT},\mathrm{DEPEND}\}\), including transitive-DEPEND vs DROP errors.
+## 9. What we do not claim
 
-Until that matrix exists, automatic counts are a pipeline diagnostic, not the final scientific claim.
+We do not claim to solve multi-step reasoning. We do not claim H1 is novel by itself. We do not require a seed-level forecaster for this paper. We do not treat HalluHard HTML scores as cascade labels.
 
-## 8. What this protocol is not
+## 10. Appendix (implementation)
 
-- Not HalluHard’s generic follow-up benchmark or HTML essay score.
-- Not a 5-style tree (accepting / topic-shift / skeptical-as-historical-name are out of the live tree).
-- Not an LLM-only seed judge (`--no-web` is debug only).
-- Not a run on unverified “Hallucinating” rows from pack v6.
-
-The first engineering tree on v6 labels is useful only as a **methods stress test**. Its DEPEND/N rates are not causal estimates: some tracked “false” claims were literature-true, many N prompts granted \(C\) as a premise, the judge often missed text after 8k characters and did not see `{hist}`, and DEPEND was mostly direct rather than transitive. The confirmatory run uses the protocol in §§3–5.
-
-## 9. Implementation notes (for the paper appendix)
-
-- Tree runner id: `hall-only-v8`. Schema version 16.
-- Architecture: DatasetAdapter → GroundingBackend → VerifiedSeed → TreeEngine. Live backend: HalluHard webscraper wrap + false-claim confirmation. FactBench is a planned second backend, not in this run.
-- Resume is node-safe; `--fresh` deletes the tree file. Do not combine `--fresh` and `--resume`.
-- Prompt-pack bumps require a new 10-example `--pilot` before scaling.
+Tree runner `hall-only-v8`; schema 16. DatasetAdapter → GroundingBackend → VerifiedSeed → TreeEngine. Live backend: HalluHard webscraper + false-claim confirmation. `--levels 2` default; `--levels 3` for strong H3. `--fresh` vs `--resume` are exclusive. Prompt-pack bumps require a new 10-example `--pilot`.
